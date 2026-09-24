@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    # ScreenCaptureKit and the Accessibility API are macOS-only, so there is no other
+    # target to build for.
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features
+
+      - name: Test
+        run: cargo test --all-features
+
+      - name: Build release
+        run: cargo build --release
+
+      # The project's central promise is that nothing leaves the machine. Asserting it
+      # on every build is the only way it stays true.
+      - name: Verify no network capability
+        run: ./scripts/check-local-only.sh
+
+  licenses:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      # Fails if a dependency introduces a copyleft licence. FFmpeg is executed as a
+      # subprocess and never linked, so no GPL code may enter the binary.
+      - name: Check licences and advisories
+        run: cargo deny check

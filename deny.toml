@@ -1,0 +1,47 @@
+# cargo-deny configuration.
+#
+# recordo executes ffmpeg as a subprocess but never links it, so no GPL code enters the
+# binary. This file exists to keep that true: a dependency that would pull copyleft into
+# the build fails CI rather than being noticed later.
+
+[licenses]
+# Permissive licences only, plus the specific exceptions documented below.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "0BSD",
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Unlicense",
+    "MPL-2.0",
+    "WTFPL",
+]
+confidence-threshold = 0.9
+
+# MPL-2.0 is file-level copyleft: obligations attach only to modified files of the
+# dependency itself, and we modify none. WTFPL is public-domain-equivalent. Both are
+# listed above deliberately rather than by accident.
+
+[bans]
+multiple-versions = "allow"
+# Linking any of these would make the binary a derivative of GPL code.
+deny = [
+    { name = "ffmpeg-sys" },
+    { name = "ffmpeg-sys-next" },
+    { name = "ffmpeg-next" },
+    { name = "x264" },
+    { name = "x264-sys" },
+]
+
+[advisories]
+yanked = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

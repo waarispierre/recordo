@@ -1,0 +1,4 @@
+# SCRecordingOutput requires macOS 15; the Swift shims in screencapturekit are built
+# for 13.0, so linking below that produces version-mismatch warnings.
+[env]
+MACOSX_DEPLOYMENT_TARGET = "15.0"

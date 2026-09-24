@@ -1,0 +1,11 @@
+target/
+
+# Recordings and their sidecars are of your screen. Never commit them.
+out/
+*.mp4
+telemetry.json
+frames.json
+meta.json
+
+# Local settings, which may contain a path to a personal background image.
+recordo.toml

@@ -1,0 +1,50 @@
+[package]
+name = "recordo"
+version = "0.1.0"
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+description = "Screen recordings with a cursor-following camera"
+repository = "https://github.com/waarispierre/recordo"
+homepage = "https://github.com/waarispierre/recordo"
+readme = "../README.md"
+keywords = ["screen-recording", "screencast", "macos", "demo", "tui"]
+categories = ["command-line-utilities", "multimedia::video"]
+rust-version.workspace = true
+default-run = "recordo"
+
+[lib]
+name = "recordo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "recordo"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+dialoguer = { version = "0.12", default-features = false }
+indicatif = "0.18"
+owo-colors = "4"
+dirs = "6"
+ctrlc = "3"
+ratatui = "0.30"
+crossterm = "0.29"
+
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+wgpu = { version = "30", features = ["wgsl"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+toml = "0.9"
+toml_edit = "0.23"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macos_15_0 gates SCRecordingOutput (direct stream-to-file).
+screencapturekit = { version = "10", features = ["macos_15_0"] }
+core-graphics = "0.25"
+core-foundation = "0.10"
+foreign-types = "0.5"
+mach2 = "0.5"
+accessibility-sys = "0.2"
