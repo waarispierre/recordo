@@ -28,6 +28,8 @@ pub struct Report {
     /// How the browser page region was determined, if at all.
     pub crop_source: CropSource,
     pub app_name: String,
+    /// Whether a voice-over track was carried through into the export.
+    pub audio: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,31 +230,49 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         .spawn()
         .context("spawn ffmpeg decoder")?;
 
+    // Composited frames arrive on stdin; the voice over is copied across from the capture
+    // as a second input. Its timestamps are ScreenCaptureKit's own, on the same timeline
+    // as the video it was recorded with, so no offset has to be applied here.
+    let audio = has_audio(src)?;
+    let size = format!("{out_w}x{out_h}");
+    let fps = FPS.to_string();
+    let mut enc_args: Vec<&str> = vec![
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file,pipe,fd",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-s",
+        &size,
+        "-r",
+        &fps,
+        "-i",
+        "-",
+    ];
+    if audio {
+        enc_args.extend(["-i", src, "-map", "0:v:0", "-map", "1:a:0"]);
+    }
+    enc_args.extend([
+        "-c:v",
+        "h264_videotoolbox",
+        "-b:v",
+        "12M",
+        "-pix_fmt",
+        "yuv420p",
+    ]);
+    if audio {
+        // The capture runs a little past the last composited frame, so without -shortest
+        // the export ends on a still image with the audio still playing.
+        enc_args.extend(["-c:a", "aac", "-b:a", "128k", "-shortest"]);
+    }
+    enc_args.push(dst);
+
     let mut encoder = Command::new(&ffmpeg)
-        .args([
-            "-v",
-            "error",
-            "-protocol_whitelist",
-            "file,pipe,fd",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-s",
-            &format!("{out_w}x{out_h}"),
-            "-r",
-            &FPS.to_string(),
-            "-i",
-            "-",
-            "-c:v",
-            "h264_videotoolbox",
-            "-b:v",
-            "12M",
-            "-pix_fmt",
-            "yuv420p",
-            dst,
-        ])
+        .args(&enc_args)
         .stdin(Stdio::piped())
         .spawn()
         .context("spawn ffmpeg encoder")?;
@@ -309,6 +329,7 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         chrome: chrome_mode,
         crop_source,
         app_name: app_name.to_string(),
+        audio,
     };
 
     Ok(report)
@@ -334,6 +355,31 @@ impl ContentRect {
             h: self.h.min(max_h - y).max(1.0),
         }
     }
+}
+
+/// True when the capture carries an audio track, i.e. it was recorded with voice over.
+///
+/// Asked of the file rather than read from `meta.json`, so a capture made before the
+/// setting existed — or one whose microphone failed to start — is judged on what is
+/// actually in it.
+fn has_audio(path: &str) -> Result<bool> {
+    let out = Command::new(crate::tools::require("ffprobe")?)
+        .args([
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe,fd",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+        .context("run ffprobe")?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim() == "audio")
 }
 
 fn probe_video(path: &str) -> Result<(u32, u32, f64)> {

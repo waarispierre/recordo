@@ -53,6 +53,7 @@ commit.
 | Screen Recording | Required to capture anything | recordo fails with a clear error |
 | Input Monitoring | Detect clicks, to trigger zoom | Records and pans, never click-zooms |
 | Accessibility | Read a browser's exact page bounds | Browser pages cropped by a fixed guess |
+| Microphone | Voice over | recordo fails with a clear error, only asked when `--mic` or `audio.microphone` is on |
 
 These are granted to the **terminal you run recordo from**, not to the binary — that is
 how macOS attributes permissions for command-line tools. `recordo doctor` shows what is
@@ -95,6 +96,14 @@ Stated plainly rather than omitted.
 - **FFmpeg is a large parser handling your capture.** recordo invokes it with
   `-protocol_whitelist file,pipe,fd`, so it cannot follow a remote reference embedded in
   a media file. That is the proportionate mitigation for locally-produced input.
+
+- **Voice over is off by default, and it is just audio.** `audio.microphone` (or `--mic`
+  for a single run) records your voice — never system audio, so a notification chime or
+  another app's sound never lands in the recording. The audio is embedded in `capture.mp4`
+  and carried into `export.mp4`, both `0600` like the rest of the recording, and both
+  removed by `recordo prune --all`. `recordo doctor` reports the current Microphone grant
+  without ever triggering the permission prompt itself. This does not change the
+  keystrokes guarantee above — nothing here observes the keyboard.
 
 ## Licensing boundary
 

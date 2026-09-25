@@ -50,6 +50,7 @@ on one platform.
 | Screen Recording | capturing at all | recording fails with a clear error |
 | Input Monitoring | click detection | records and pans, but never click-zooms |
 | Accessibility | exact web page bounds | browser pages fall back to a fixed crop guess |
+| Microphone | voice over | recording fails with a clear error, only if `--mic` or `audio.microphone` is on |
 
 Screen Recording requires quitting and reopening your terminal after granting it.
 
@@ -85,6 +86,7 @@ recordo -w 422          # record a specific window id
 recordo -d              # record the whole display
 recordo -s 10           # stop after 10 seconds
 recordo -z 30           # 30% zoom for this run only
+recordo --mic            # record voice over for this run only
 ```
 
 Recording stops on Enter or Ctrl-C. The finished video opens automatically; pass
@@ -95,6 +97,7 @@ capture, its sidecars and the finished `export.mp4`.
 
 ```sh
 recordo windows         # list recordable windows and their ids
+recordo devices         # list microphones (and cameras, once recorded)
 recordo list            # list past recordings
 recordo render          # re-render the most recent recording
 recordo render <path>   # re-render a specific one
@@ -196,6 +199,8 @@ The image is scaled to **cover** and centre-cropped, so any aspect ratio works.
 | `style.bg_top` / `bg_bottom` | background gradient, RGB 0-1 |
 | `style.background_image` | image behind the window; overrides the gradient. `""` uses the gradient. Accepts `~` and relative paths |
 | `style.chrome` | `auto`, `none`, `window` or `browser` |
+| `audio.microphone` | record voice over alongside the screen. Off by default |
+| `audio.device` | which microphone, matched by name. Empty uses the system default |
 
 All lengths are in **points** and scale with the capture, so the look is identical on
 Retina and non-Retina displays.
@@ -212,6 +217,22 @@ Retina and non-Retina displays.
 
 Without Accessibility permission, browsers fall back to cropping `style.browser_crop_top`
 points off the top, which is only a guess. The renderer says so when it happens.
+
+### Voice over
+
+Off by default — a recording should never pick up the room by surprise.
+
+```sh
+recordo config set audio.microphone true
+recordo --mic -s 30              # or just for this run
+recordo devices                  # see which microphone will be used
+recordo config set audio.device "Space Q45"
+```
+
+The microphone is captured by the same ScreenCaptureKit stream as the screen, so it needs
+no separate encoding pass and no manual sync: both land in `capture.mp4` on the same
+clock, and `render`/`export` carry the audio through untouched. macOS asks for Microphone
+permission the first time; `doctor` reports whether it is granted.
 
 ## Privacy
 

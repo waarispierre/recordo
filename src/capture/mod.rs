@@ -6,6 +6,7 @@
 //! changing anything above.
 
 pub mod clock;
+pub mod devices;
 pub mod frames;
 pub mod recorder;
 pub mod telemetry;

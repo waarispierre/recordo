@@ -4,6 +4,7 @@ use crate::capture::{frames, telemetry, webarea};
 use crate::config::Config;
 use crate::session::Session;
 use anyhow::{Context, Result, anyhow};
+use screencapturekit::audio_devices::AudioInputDevice;
 use screencapturekit::cg::{CGPoint, CGRect, CGSize};
 use screencapturekit::prelude::*;
 use screencapturekit::recording_output::{
@@ -29,6 +30,9 @@ pub struct Plan {
     pub capture_w: u32,
     pub capture_h: u32,
     pub scale: u32,
+    /// Name of the microphone being recorded, or None when voice over is off. Resolved
+    /// in `record`, since `plan` does not see the config.
+    pub microphone: Option<String>,
 }
 
 /// Resolves what will be recorded, without starting anything.
@@ -115,7 +119,42 @@ pub fn plan(
         capture_w: rect.2 as u32 * scale,
         capture_h: rect.3 as u32 * scale,
         scale,
+        microphone: None,
     })
+}
+
+/// The microphone to record, as (device id, display name).
+///
+/// An empty `want` takes whatever macOS is currently set to, which is what most people
+/// mean. A named one is matched the way `--app` matches a window: case-insensitive
+/// substring, so "space q45" finds "soundcore Space Q45".
+fn microphone(want: &str) -> Result<(Option<String>, String)> {
+    let want = want.trim();
+    if want.is_empty() {
+        let name = AudioInputDevice::default_device()
+            .map(|d| d.name)
+            .unwrap_or_else(|| "system default".into());
+        return Ok((None, name));
+    }
+
+    let devices = AudioInputDevice::list();
+    let hit = devices
+        .iter()
+        .find(|d| d.name.to_lowercase().contains(&want.to_lowercase()));
+    match hit {
+        Some(d) => Ok((Some(d.id.clone()), d.name.clone())),
+        None => {
+            let known: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+            Err(anyhow!(
+                "no microphone matching \"{want}\" — available: {}",
+                if known.is_empty() {
+                    "none".to_string()
+                } else {
+                    known.join(", ")
+                }
+            ))
+        }
+    }
 }
 
 fn scale_for(content: &SCShareableContent, window: &Option<SCWindow>) -> Result<u32> {
@@ -152,7 +191,17 @@ pub fn record(
         .into_iter()
         .next()
         .context("no displays found")?;
-    let plan = plan(target, chooser)?;
+    let mut plan = plan(target, chooser)?;
+
+    // Resolved before the stream is built, so a bad device name fails immediately rather
+    // than after a recording has already been made.
+    let mic = if config.audio.microphone {
+        let (id, name) = microphone(&config.audio.device)?;
+        plan.microphone = Some(name);
+        Some(id)
+    } else {
+        None
+    };
 
     let filter = match &plan.target {
         // Deliberately not SCContentFilter(desktopIndependentWindow:) — that trips a
@@ -179,6 +228,14 @@ pub fn record(
         .with_height(plan.capture_h)
         .with_fps(60)
         .with_shows_cursor(true);
+    if let Some(device) = &mic {
+        // Microphone only. `captures_audio` — system audio — stays off, so a notification
+        // chime or whatever else is playing never lands in the recording.
+        stream_config = stream_config.with_captures_microphone(true);
+        if let Some(id) = device {
+            stream_config = stream_config.with_microphone_capture_device_id(id);
+        }
+    }
     if plan.target.is_some() {
         stream_config = stream_config.with_source_rect(CGRect {
             origin: CGPoint {
@@ -269,13 +326,13 @@ pub fn record(
             "web_rect": web_rect.map(|r| serde_json::json!({
                 "x": r.x, "y": r.y, "w": r.w, "h": r.h
             })),
+            "microphone": plan.microphone,
         }))?,
     )?;
 
     // ScreenCaptureKit writes the capture with the default umask.
     crate::session::restrict(&capture_path)?;
 
-    let _ = config;
     Ok(())
 }
 

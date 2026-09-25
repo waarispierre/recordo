@@ -15,6 +15,7 @@ pub const DEFAULT_PATH: &str = "recordo.toml";
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub camera: CameraSettings,
+    pub audio: AudioSettings,
     pub style: StyleSettings,
 }
 
@@ -31,6 +32,16 @@ pub struct CameraSettings {
     /// Radius of the deadzone around the camera centre, as a percentage of the visible
     /// width. Cursor movement inside it is ignored. 0 follows continuously.
     pub follow_deadzone_percent: f64,
+}
+
+/// Voice over. Off by default: a recording should never pick up the room by surprise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioSettings {
+    /// Record the microphone alongside the screen.
+    pub microphone: bool,
+    /// Which microphone, matched on name. Empty uses the system default.
+    pub device: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -238,6 +249,15 @@ follow_hz = 1.1
 # to 0 to follow continuously.
 follow_deadzone_percent = 10.0
 
+[audio]
+# Record your voice while you record the screen. Off by default, so a recording never
+# picks up the room by surprise. macOS asks for Microphone permission the first time.
+microphone = false
+
+# Which microphone, matched on name — "recordo devices" lists them. Empty uses whichever
+# input macOS is currently set to.
+device = ""
+
 [style]
 # All lengths below are in POINTS and scale with the capture, so the look is the same
 # on Retina and non-Retina displays.
@@ -417,10 +437,12 @@ fn add_missing_settings(text: &str) -> Result<Option<String>> {
         };
 
         if doc.get(section_name).is_none() {
-            doc.insert(
-                section_name,
-                toml_edit::Item::Table(toml_edit::Table::new()),
-            );
+            // Clone the default table's header decor too, so a whole new section arrives
+            // with its blank line and heading comment rather than jammed against the
+            // previous one.
+            let mut fresh = toml_edit::Table::new();
+            *fresh.decor_mut() = default_table.decor().clone();
+            doc.insert(section_name, toml_edit::Item::Table(fresh));
             changed = true;
         }
         let Some(target) = doc.get_mut(section_name).and_then(|i| i.as_table_mut()) else {
@@ -536,6 +558,9 @@ mod migration_tests {
         let only_camera = "[camera]\nzoom_percent = 45.0\n";
         let migrated = add_missing_settings(only_camera).unwrap().unwrap();
         assert!(migrated.contains("[style]"));
+        // A whole new section arrives with its own heading comment, not just its keys.
+        assert!(migrated.contains("[audio]"));
+        assert!(migrated.contains("Record your voice while you record the screen"));
         assert!(toml::from_str::<Config>(&migrated).is_ok());
     }
 }
