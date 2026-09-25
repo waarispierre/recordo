@@ -13,7 +13,7 @@
 //! The tap failing therefore degrades the recording to "pan but never click-zoom"
 //! rather than losing cursor tracking entirely.
 
-use crate::clock;
+use crate::capture::clock;
 use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes, kCFRunLoopDefaultMode};
 use core_graphics::event::{
     CGEvent, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,

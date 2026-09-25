@@ -53,7 +53,7 @@ impl SCStreamOutputTrait for FrameLogHandler {
         let display_time_ns = sample
             .frame_info()
             .and_then(|info| info.display_time)
-            .map(crate::clock::mach_to_nanos);
+            .map(crate::capture::clock::mach_to_nanos);
 
         self.log.push(FrameRecord {
             pts_ns,

@@ -1,8 +1,8 @@
 //! Screen capture with out-of-band cursor telemetry.
 
+use crate::capture::{frames, telemetry, webarea};
 use crate::config::Config;
 use crate::session::Session;
-use crate::{frames, telemetry, webarea};
 use anyhow::{Context, Result, anyhow};
 use screencapturekit::cg::{CGPoint, CGRect, CGSize};
 use screencapturekit::prelude::*;
@@ -48,9 +48,9 @@ pub fn plan(
     let window =
         match target {
             Target::Display => None,
-            Target::Ask => chooser(&crate::pick::capturable(&content))?,
+            Target::Ask => chooser(&crate::capture::windows::capturable(&content))?,
             Target::App(name) => {
-                let mut hits: Vec<SCWindow> = crate::pick::capturable(&content)
+                let mut hits: Vec<SCWindow> = crate::capture::windows::capturable(&content)
                     .into_iter()
                     .filter(|w| {
                         w.owning_application().is_some_and(|a| {
@@ -73,7 +73,7 @@ pub fn plan(
                 })?)
             }
             Target::Window(id) => Some(
-                crate::pick::capturable(&content)
+                crate::capture::windows::capturable(&content)
                     .into_iter()
                     .find(|w| w.window_id() == *id)
                     .ok_or_else(|| anyhow!("no window with id {id} — try `recordo windows`"))?,
@@ -99,7 +99,7 @@ pub fn plan(
             }
             (
                 (f.origin.x, f.origin.y, f.size.width, f.size.height),
-                crate::pick::label(w),
+                crate::capture::windows::label(w),
             )
         }
         None => (

@@ -11,7 +11,7 @@
 //!   * While zoomed out the camera returns to frame centre, so a still recording has no
 //!     drift.
 
-use crate::telemetry::{EventKind, Telemetry};
+use crate::capture::telemetry::{EventKind, Telemetry};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy)]
@@ -162,7 +162,7 @@ pub fn solve(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::TelemetryEvent;
+    use crate::capture::telemetry::TelemetryEvent;
 
     const W: f64 = 1512.0;
     const H: f64 = 982.0;

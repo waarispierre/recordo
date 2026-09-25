@@ -1,13 +1,12 @@
 //! recordo — screen recordings with a cursor-following camera.
 
-mod tui;
-mod ui;
+mod app;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use owo_colors::OwoColorize;
+use recordo::capture::recorder::{self, Target};
 use recordo::config::Config;
-use recordo::recorder::{self, Target};
 use recordo::session::{self, Session};
 
 #[derive(Parser)]
@@ -141,7 +140,7 @@ fn run() -> Result<()> {
         None | Some(Command::Record) => cmd_record(&cli, target),
         Some(Command::Render { ref path }) => cmd_render(&cli, path.clone()),
         Some(Command::Windows) => cmd_windows(),
-        Some(Command::Doctor { verbose }) => ui::doctor(verbose),
+        Some(Command::Doctor { verbose }) => app::ui::doctor(verbose),
         Some(Command::List) => cmd_list(),
         Some(Command::Prune {
             older_than,
@@ -157,17 +156,17 @@ fn run() -> Result<()> {
 /// Drives the TUI, suspending it whenever a long-running job needs the plain terminal.
 fn run_tui(cli: &Cli) -> Result<()> {
     loop {
-        match tui::run()? {
-            tui::Action::Quit => return Ok(()),
-            tui::Action::Record(target) => {
+        match app::tui::run()? {
+            app::tui::Action::Quit => return Ok(()),
+            app::tui::Action::Record(target) => {
                 let outcome = cmd_record(cli, target);
                 report_and_pause(outcome)?;
             }
-            tui::Action::Render(dir) => {
+            app::tui::Action::Render(dir) => {
                 let outcome = cmd_render(cli, Some(dir.to_string_lossy().into_owned()));
                 report_and_pause(outcome)?;
             }
-            tui::Action::Open(path) => {
+            app::tui::Action::Open(path) => {
                 std::process::Command::new("/usr/bin/open")
                     .arg(&path)
                     .status()?;
@@ -196,12 +195,12 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
     }
     let session = Session::create()?;
 
-    ui::banner();
+    app::ui::banner();
     recorder::record(
         &session,
         &target,
         &config,
-        ui::choose_window,
+        app::ui::choose_window,
         |plan| {
             println!(
                 "  {} {}",
@@ -216,11 +215,11 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
                 plan.scale
             );
         },
-        || ui::wait_for_stop(cli.seconds),
+        || app::ui::wait_for_stop(cli.seconds),
     )?;
 
     let health = recorder::health(&session)?;
-    ui::health_report(&health);
+    app::ui::health_report(&health);
 
     if cli.no_render {
         println!("  {} {}", "saved".cyan(), session.dir.display());
@@ -228,7 +227,7 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
     }
 
     let out = session.export();
-    ui::render(&session, &out, cli.zoom)?;
+    app::ui::render(&session, &out, cli.zoom)?;
     println!("\n  🏁 {}", out.display().bold());
 
     if !cli.no_open {
@@ -250,7 +249,7 @@ fn cmd_render(cli: &Cli, path: Option<String>) -> Result<()> {
         session.dir.display().bright_black()
     );
     let out = session.export();
-    ui::render(&session, &out, cli.zoom)?;
+    app::ui::render(&session, &out, cli.zoom)?;
     println!("\n  🏁 {}", out.display().bold());
     if !cli.no_open {
         let _ = std::process::Command::new("/usr/bin/open")
@@ -263,7 +262,7 @@ fn cmd_render(cli: &Cli, path: Option<String>) -> Result<()> {
 fn cmd_windows() -> Result<()> {
     use screencapturekit::prelude::*;
     let content = SCShareableContent::get().context("grant Screen Recording permission")?;
-    let windows = recordo::pick::capturable(&content);
+    let windows = recordo::capture::windows::capturable(&content);
     if windows.is_empty() {
         println!("  no windows found");
         return Ok(());
@@ -273,7 +272,7 @@ fn cmd_windows() -> Result<()> {
         println!(
             "  {:>9}  {}",
             w.window_id().to_string().cyan(),
-            recordo::pick::label(&w)
+            recordo::capture::windows::label(&w)
         );
     }
     println!(
@@ -410,7 +409,7 @@ fn cmd_config(action: &ConfigAction) -> Result<()> {
             // Piped or redirected output cannot drive a menu; printing the settings is
             // the useful thing to do instead of failing.
             if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                ui::config_menu(&path)?;
+                app::ui::config_menu(&path)?;
             } else {
                 return cmd_config(&ConfigAction::Show);
             }

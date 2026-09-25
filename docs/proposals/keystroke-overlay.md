@@ -108,17 +108,17 @@ with the WGSL. Not worth it for a static overlay. Recommend CPU.
 
 | # | File | Change |
 |---|---|---|
-| 1 | `config.rs` | New `[capture]` section with `keystrokes: bool` (default `false`); entry in `DEFAULT_TOML` carrying the warning. |
-| 2 | `keycode.rs` *(new)* | Virtual keycode + modifier flags → label. Pure, tested. |
-| 3 | `telemetry.rs` | `EventKind::Key`, `key: Option<String>` with `#[serde(default)]`, conditional tap mask, `start(capture_keys)`. |
-| 4 | `recorder.rs` | Pass `config.capture.keystrokes` through; record it in `meta.json` so render knows whether keys exist. First real use of the `config` parameter it currently discards (`let _ = config;`). |
-| 5 | `keys.rs` *(new)* | Grouping, fade and truncation model. Pure, tested. |
-| 6 | `overlay.rs` *(new)* | CoreText label rasterization with a cache. |
-| 7 | `render.rs` | Blend the overlay during the existing readback row walk. |
-| 8 | `exporter.rs` | Build the overlay track beside the crops; add a line to `Report`. |
-| 9 | `ui.rs` | Warning at record start (safeguard b); `doctor` line (d); key count in `health_report`. |
-| 10 | `main.rs` | `scrub` subcommand (safeguard f). |
-| 11 | README, `CODE-TOUR.md` | Document the setting, the secure-input behaviour, and the new modules. |
+| 1 | `src/config.rs` | New `[capture]` section with `keystrokes: bool` (default `false`); entry in `DEFAULT_TOML` carrying the warning. |
+| 2 | `src/capture/keycode.rs` *(new)* | Virtual keycode + modifier flags → label. Pure, tested. |
+| 3 | `src/capture/telemetry.rs` | `EventKind::Key`, `key: Option<String>` with `#[serde(default)]`, conditional tap mask, `start(capture_keys)`. |
+| 4 | `src/capture/recorder.rs` | Pass `config.capture.keystrokes` through; record it in `meta.json` so render knows whether keys exist. First real use of the `config` parameter it currently discards (`let _ = config;`). |
+| 5 | `src/keys.rs` *(new)* | Grouping, fade and truncation model. Pure, tested. |
+| 6 | `src/render/overlay.rs` *(new)* | CoreText label rasterization with a cache. |
+| 7 | `src/render/mod.rs` | Blend the overlay during the existing readback row walk. |
+| 8 | `src/render/export.rs` | Build the overlay track beside the crops; add a line to `Report`. |
+| 9 | `src/app/ui.rs` | Warning at record start (safeguard b); `doctor` line (d); key count in `health_report`. |
+| 10 | `src/main.rs` | `scrub` subcommand (safeguard f). |
+| 11 | README, `docs/code-tour.md` | Document the setting, the secure-input behaviour, and the new modules. |
 
 Items 1–5 and 9 are straightforward. **Item 6 is the only real unknown** — check
 `core-text` compatibility against the pinned `core-graphics 0.25` before committing to it.

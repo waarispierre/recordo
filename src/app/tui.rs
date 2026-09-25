@@ -13,8 +13,8 @@ use crossterm::terminal::{
 };
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use recordo::capture::recorder::Target;
 use recordo::config::{self, Config, Setting};
-use recordo::recorder::Target;
 use recordo::session::{self, Session};
 use std::time::Duration;
 
@@ -67,8 +67,8 @@ fn load_windows() -> Windows {
     let mut labels = vec!["entire display".to_string()];
     let mut ids: Vec<Option<u32>> = vec![None];
     if let Ok(content) = SCShareableContent::get() {
-        for w in recordo::pick::capturable(&content) {
-            labels.push(recordo::pick::label(&w));
+        for w in recordo::capture::windows::capturable(&content) {
+            labels.push(recordo::capture::windows::label(&w));
             ids.push(Some(w.window_id()));
         }
     }

@@ -1,9 +1,14 @@
-//! Offscreen wgpu compositor.
+//! Compositing and encoding.
 //!
-//! Renders one frame at a time: upload the decoded source frame, draw a full-screen
-//! triangle that samples it through the crop window, read the result back. Readback via
-//! CPU is the simple path and is fast enough to beat real time; a later phase can keep
-//! frames on the GPU and hand them straight to the encoder.
+//! This module is the offscreen wgpu compositor: it renders one frame at a time by
+//! uploading the decoded source frame, drawing a full-screen triangle that samples it
+//! through the crop window, then reading the result back. Readback via CPU is the simple
+//! path and is fast enough to beat real time; a later phase can keep frames on the GPU
+//! and hand them straight to the encoder.
+//!
+//! [`export`] drives it end to end — decode, composite, encode.
+
+pub mod export;
 
 use crate::camera::Crop;
 use anyhow::{Context, Result, anyhow};

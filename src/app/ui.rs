@@ -3,8 +3,8 @@
 use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use owo_colors::OwoColorize;
-use recordo::exporter::CropSource;
-use recordo::recorder::Health;
+use recordo::capture::recorder::Health;
+use recordo::render::export::CropSource;
 use recordo::session::Session;
 use screencapturekit::prelude::SCWindow;
 use std::io::Write;
@@ -33,7 +33,7 @@ pub fn choose_window(windows: &[SCWindow]) -> Result<Option<SCWindow>> {
         println!(
             "  {:>2}  {}",
             (i + 1).to_string().cyan(),
-            recordo::pick::label(w)
+            recordo::capture::windows::label(w)
         );
     }
     print!("\n  {} ", "choice [0]:".bold());
@@ -158,7 +158,7 @@ pub fn render(session: &Session, out: &std::path::Path, zoom: Option<f64>) -> Re
     bar.set_message("rendering".to_string());
     bar.enable_steady_tick(Duration::from_millis(120));
 
-    let result = recordo::exporter::run_with(
+    let result = recordo::render::export::run_with(
         &session.capture().to_string_lossy(),
         &out.to_string_lossy(),
         zoom,
@@ -196,7 +196,7 @@ pub fn doctor(verbose: bool) -> Result<()> {
         "required — grant it to your terminal, then restart it",
     );
 
-    let accessibility = recordo::webarea::is_trusted();
+    let accessibility = recordo::capture::webarea::is_trusted();
     check(
         "Accessibility",
         accessibility,
@@ -247,7 +247,7 @@ fn browser_report() -> Result<()> {
     let content = SCShareableContent::get().context("grant Screen Recording permission")?;
     let mut found = false;
 
-    for w in recordo::pick::capturable(&content) {
+    for w in recordo::capture::windows::capturable(&content) {
         let Some(app) = w.owning_application() else {
             continue;
         };
@@ -256,14 +256,14 @@ fn browser_report() -> Result<()> {
         }
         found = true;
         let f = w.frame();
-        let window = recordo::webarea::Rect {
+        let window = recordo::capture::webarea::Rect {
             x: f.origin.x,
             y: f.origin.y,
             w: f.size.width,
             h: f.size.height,
         };
         print!("  {} {:<16}", "·".bright_black(), app.application_name());
-        match recordo::webarea::web_content_rect(app.process_id(), window) {
+        match recordo::capture::webarea::web_content_rect(app.process_id(), window) {
             Some(r) => println!(
                 "page {:.0}x{:.0}, chrome {:.0}pt {}",
                 r.w,

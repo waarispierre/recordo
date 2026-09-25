@@ -62,11 +62,17 @@ else
 fi
 
 echo "== this crate calls no socket API =="
-own=$(grep -rn "CFSocket\|udp_ipv4\|socket_create" cli/src/ || true)
-if [[ -n "$own" ]]; then
-    bad "recordo source references a socket API" "$own"
+# Guard the path itself: a rename that silently makes this grep search nothing would
+# turn the check into a no-op that always passes.
+if [[ ! -d src ]]; then
+    bad "src/ not found — this check would pass without inspecting anything"
 else
-    ok "no socket API referenced in cli/src"
+    own=$(grep -rn "CFSocket\|udp_ipv4\|socket_create" src/ || true)
+    if [[ -n "$own" ]]; then
+        bad "recordo source references a socket API" "$own"
+    else
+        ok "no socket API referenced in src/"
+    fi
 fi
 
 echo "== dependencies =="

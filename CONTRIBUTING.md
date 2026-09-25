@@ -9,7 +9,7 @@ cargo test
 ```
 
 macOS 15+ is required: the capture path uses `SCRecordingOutput`, which is not available
-earlier. You need Xcode Command Line Tools, but not full Xcode — `cli/build.rs` points
+earlier. You need Xcode Command Line Tools, but not full Xcode — `build.rs` points
 the linker at the Swift runtime that ships with the Command Line Tools.
 
 Running the tool needs Screen Recording permission on your terminal. `recordo doctor`
@@ -88,23 +88,34 @@ avoiding entirely.
 
 ## Structure
 
-`cli/src/` holds everything:
+The repository separates the application from the machinery around it:
 
-| File | Responsibility |
+```
+src/          the application
+ci/           the CI runner, the same one GitHub runs
+scripts/      standalone tools, also invoked by ci/
+packaging/    Homebrew formula and release steps
+docs/         code tour and proposals
+```
+
+Within `src/`, the layout follows the three layers the app is built from:
+
+| Path | Responsibility |
 |---|---|
-| `recorder.rs` | ScreenCaptureKit capture, window targeting |
-| `telemetry.rs` | Cursor polling and the click event tap |
-| `camera.rs` | Telemetry to per-frame crop rectangle — the motion model |
-| `render.rs`, `shader.wgsl` | GPU compositing |
-| `exporter.rs` | Decode, composite, encode |
-| `config.rs` | Settings, validation, browser detection |
-| `tui.rs`, `ui.rs` | Full-screen app and line-oriented output |
-| `session.rs` | Where recordings live, and their permissions |
-| `webarea.rs` | Accessibility lookup of a browser's page bounds |
+| `src/capture/` | Everything platform-specific: ScreenCaptureKit frames, the cursor tap, window selection, browser page bounds |
+| `src/camera.rs` | Telemetry to a per-frame crop rectangle — the motion model |
+| `src/render/` | GPU compositing (`mod.rs`, `shader.wgsl`) and the decode/encode pipeline (`export.rs`) |
+| `src/app/` | Full-screen TUI and line-oriented output. Binary-only |
+| `src/config.rs`, `session.rs`, `tools.rs` | Settings, where recordings live, helper-binary resolution |
 
-`camera.rs` is pure maths with no OS or GPU dependency, so it is the one part that can be
-tested properly — and the part where the product's perceived quality actually lives.
+`src/capture/` is the only layer that knows it is on macOS. A Windows port would add
+siblings there and leave the rest untouched.
+
+`src/camera.rs` is pure maths with no OS or GPU dependency, so it is the one part that can
+be tested properly — and the part where the product's perceived quality actually lives.
 Changes there should come with tests.
+
+There is a longer walkthrough in [docs/code-tour.md](docs/code-tour.md).
 
 ## Reporting a security issue
 

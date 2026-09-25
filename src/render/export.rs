@@ -4,12 +4,12 @@
 //! camera model, and pipes the result to a hardware H.264 encoder.
 
 use crate::camera::{self, Crop};
-use crate::clock;
+use crate::capture::clock;
+use crate::capture::frames::FrameRecord;
+use crate::capture::telemetry::Telemetry;
 use crate::config::Config;
-use crate::frames::FrameRecord;
 use crate::render::Chrome;
 use crate::render::{self as render, BackgroundImage, Renderer};
-use crate::telemetry::Telemetry;
 use anyhow::{Context, Result, anyhow};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
