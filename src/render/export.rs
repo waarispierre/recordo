@@ -341,6 +341,10 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
 
     let start = clock::now_nanos();
     let mut rendered = 0usize;
+    // Set when the encoder ends the render early (see the `BrokenPipe` case below): the
+    // decoders are still mid-stream at that point, and would otherwise block writing into
+    // a pipe nobody is reading from, hanging their `wait()` forever.
+    let mut encoder_closed_early = false;
 
     loop {
         match dec_out.read_exact(&mut src_buf) {
@@ -374,14 +378,33 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         };
 
         renderer.render(&src_buf, crop, cam_frame, &mut out_buf)?;
-        enc_in
-            .write_all(&out_buf)
-            .context("write frame to encoder")?;
+        match enc_in.write_all(&out_buf) {
+            Ok(()) => {}
+            // `-shortest` (used when a voice-over track is present) can end the encoder
+            // as soon as the audio input finishes decoding, which races the video side:
+            // the container's duration includes the audio, so it can be a few tens of
+            // milliseconds longer than the video stream's own duration, and this loop
+            // solves frames for the container duration. A closed pipe here means the
+            // encoder already has everything it needs, not that anything failed.
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                encoder_closed_early = true;
+                break;
+            }
+            Err(e) => return Err(e).context("write frame to encoder"),
+        }
         rendered += 1;
     }
 
     drop(enc_in);
     let elapsed_ns = clock::now_nanos() - start;
+    if encoder_closed_early {
+        // The decoders are still writing into pipes we've stopped draining; kill them
+        // rather than wait, or a still-running one blocks this call forever.
+        let _ = decoder.kill();
+        if let Some(w) = webcam_setup.as_mut() {
+            let _ = w.decoder.kill();
+        }
+    }
     decoder.wait().ok();
     if let Some(w) = webcam_setup.as_mut() {
         w.decoder.wait().ok();
