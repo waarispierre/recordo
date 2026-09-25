@@ -1,30 +1,38 @@
-# typed: false
+# typed: strict
 # frozen_string_literal: true
 
 # Homebrew formula for recordo.
 #
-# Copy this into a tap repository — github.com/waarispierre/homebrew-tap — at
-# Formula/recordo.rb. Users then install with:
+# Copy into a tap repository — github.com/waarispierre/homebrew-tap — at
+# Formula/recordo.rb.
 #
-#     brew install waarispierre/tap/recordo
+# This is deliberately head-only: it has no `url`/`sha256` stable release. A formula's
+# stable URL is fetched with curl, which holds no GitHub credentials, so a private
+# repository's tarball 404s. `head` clones over git instead, where SSH authenticates —
+# which makes this installable while the source stays private.
 #
-# Built from source deliberately. A locally compiled binary is not quarantined by
-# Gatekeeper, so no Apple Developer account, code signing or notarization is needed.
+#     brew install --HEAD waarispierre/tap/recordo
+#
+# Once the repository is public, scripts/release.sh adds the stable url and sha256, and
+# plain `brew install` starts working.
 class Recordo < Formula
   desc "Screen recordings with a cursor-following camera"
   homepage "https://github.com/waarispierre/recordo"
-  url "https://github.com/waarispierre/recordo/archive/refs/tags/v0.1.0.tar.gz"
-  # Replace after tagging:  shasum -a 256 <downloaded tarball>
-  sha256 "REPLACE_WITH_TARBALL_SHA256"
   license any_of: ["MIT", "Apache-2.0"]
-  head "https://github.com/waarispierre/recordo.git", branch: "main"
+
+  # SSH rather than HTTPS so a private repository authenticates with your existing keys.
+  head "git@github.com:waarispierre/recordo.git", branch: "main"
 
   depends_on "rust" => :build
   # ffmpeg is executed as a subprocess, never linked, so its GPL licence does not reach
   # this formula's binary. Declaring it here is what makes installation one command.
   depends_on "ffmpeg"
-  # SCRecordingOutput, used to write the capture, is macOS 15+.
-  depends_on macos: :sequoia
+  # macOS 26, not 15. SCRecordingOutput needs only macOS 15, but building requires a
+  # macOS 26 SDK: the apple-metal crate's Swift bridge references MTLSamplerReductionMode
+  # and MTLSamplerDescriptor.lodBias behind `if #available(macOS 26.0, *)`, and that
+  # runtime guard does not stop the compiler needing the symbols. Declaring :sequoia here
+  # would let Homebrew start a build that cannot succeed.
+  depends_on macos: :tahoe
 
   def install
     system "cargo", "install", *std_cargo_args

@@ -10,7 +10,7 @@ that follows your cursor, rounded corners, a drop shadow and a styled background
 browsers it keeps only the web page and draws a clean window frame around it, so the
 video shows no tabs, bookmarks, profile avatar or URL history.
 
-macOS only for now.
+macOS 26 (Tahoe) or later. See [why 26 and not 15](CONTRIBUTING.md#getting-set-up).
 
 ## Install
 

@@ -10,9 +10,11 @@ on:
 # failure rather than skipping the check.
 jobs:
   ci:
-    # recordo compiles only on macOS, and macOS 15 specifically: the capture path uses
-    # SCRecordingOutput, which is not available earlier.
-    runs-on: macos-15
+    # macOS 26, not 15. SCRecordingOutput needs macOS 15, but the apple-metal crate's
+    # Swift bridge references MTLSamplerReductionMode and MTLSamplerDescriptor.lodBias
+    # behind `if #available(macOS 26.0, *)`. That is a runtime guard — the code still has
+    # to compile against the SDK — so anything older than a macOS 26 SDK fails to build.
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 

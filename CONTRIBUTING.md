@@ -8,8 +8,16 @@ cargo build
 cargo test
 ```
 
-macOS 15+ is required: the capture path uses `SCRecordingOutput`, which is not available
-earlier. You need Xcode Command Line Tools, but not full Xcode — `build.rs` points
+**macOS 26+ is required to build.** Two separate limits, worth not conflating:
+
+- `SCRecordingOutput`, used to write the capture, needs macOS 15 at *runtime*.
+- The `apple-metal` crate's Swift bridge references `MTLSamplerReductionMode` and
+  `MTLSamplerDescriptor.lodBias` behind `if #available(macOS 26.0, *)`. That guard is a
+  runtime check, so the code still has to compile against an SDK that has those symbols.
+  A macOS 15 SDK therefore fails to build, despite `apple-metal` declaring `.macOS(.v11)`
+  in its `Package.swift` — an upstream inaccuracy.
+
+The build minimum is the binding one, so it is what CI and the Homebrew formula use. You need Xcode Command Line Tools, but not full Xcode — `build.rs` points
 the linker at the Swift runtime that ships with the Command Line Tools.
 
 Running the tool needs Screen Recording permission on your terminal. `recordo doctor`
