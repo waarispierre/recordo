@@ -458,5 +458,5 @@ Written 2026-09-24, while the CLI layer was being actively refactored — `main.
 structure should hold; exact line contents may have moved. `camera.rs`, `clock.rs`,
 `frames.rs`, `pick.rs` and `webarea.rs` were stable.
 
-See `SECURITY-HARDENING-PLAN.md` for the separate review of what leaves the machine
+See [SECURITY.md](SECURITY.md) for what leaves the machine
 (nothing) and the hardening work outstanding.

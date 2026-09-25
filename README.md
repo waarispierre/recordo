@@ -210,7 +210,8 @@ recordo prune --all            # remove recordings entirely
 ```
 
 Without `--all` it only touches recordings that already have a render, so it cannot delete
-the sole copy of anything. See `SECURITY-HARDENING-PLAN.md` for the full review.
+the sole copy of anything. See [SECURITY.md](SECURITY.md) for the full picture,
+including known limitations.
 
 ## Known limitations
 

@@ -103,4 +103,5 @@ Changes there should come with tests.
 ## Reporting a security issue
 
 Please open a private security advisory on GitHub rather than a public issue.
-`SECURITY-HARDENING-PLAN.md` records the review this project has already had.
+[SECURITY.md](SECURITY.md) documents the properties this project guarantees and the
+limitations it does not hide.
