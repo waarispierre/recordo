@@ -33,6 +33,11 @@ pub struct Plan {
     /// Name of the microphone being recorded, or None when voice over is off. Resolved
     /// in `record`, since `plan` does not see the config.
     pub microphone: Option<String>,
+    /// Name of the camera being recorded, or None when the webcam overlay is off or the
+    /// camera failed to open. A failed camera degrades the recording to screen-only
+    /// rather than failing it, the same way a failed click-event tap degrades to
+    /// `tap_installed: false`.
+    pub webcam: Option<String>,
 }
 
 /// Resolves what will be recorded, without starting anything.
@@ -120,6 +125,7 @@ pub fn plan(
         capture_h: rect.3 as u32 * scale,
         scale,
         microphone: None,
+        webcam: None,
     })
 }
 
@@ -289,6 +295,21 @@ pub fn record(
         )
     });
 
+    let webcam = if config.webcam.enabled {
+        match crate::capture::webcam::Webcam::start(&config.webcam.device, &session.camera()) {
+            Ok((cam, name)) => {
+                plan.webcam = Some(name);
+                Some(cam)
+            }
+            Err(e) => {
+                eprintln!("  ! webcam unavailable, recording screen only: {e:#}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let tel = telemetry::TelemetryRecorder::start();
     stream.start_capture().context("failed to start capture")?;
     on_start(&plan);
@@ -297,6 +318,16 @@ pub fn record(
 
     let telemetry = tel.stop();
     let frame_times = frame_log.snapshot();
+    if let Some(cam) = webcam {
+        let camera_frames = cam.stop();
+        crate::session::write_private(
+            &session.camera_frames(),
+            &serde_json::to_vec_pretty(&camera_frames)?,
+        )?;
+        if session.camera().exists() {
+            crate::session::restrict(&session.camera())?;
+        }
+    }
 
     // Sidecars describe where the cursor went for the whole session; keep them as
     // private as the video itself.
@@ -327,6 +358,7 @@ pub fn record(
                 "x": r.x, "y": r.y, "w": r.w, "h": r.h
             })),
             "microphone": plan.microphone,
+            "webcam": plan.webcam,
         }))?,
     )?;
 

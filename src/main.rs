@@ -58,6 +58,14 @@ struct Cli {
     /// Skip voice over for this run only (overrides config)
     #[arg(long, global = true)]
     no_mic: bool,
+
+    /// Show the webcam overlay for this run only (overrides config)
+    #[arg(long, global = true, conflicts_with = "no_webcam")]
+    webcam: bool,
+
+    /// Skip the webcam overlay for this run only (overrides config)
+    #[arg(long, global = true)]
+    no_webcam: bool,
 }
 
 #[derive(Subcommand)]
@@ -209,6 +217,11 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
     } else if cli.no_mic {
         config.audio.microphone = false;
     }
+    if cli.webcam {
+        config.webcam.enabled = true;
+    } else if cli.no_webcam {
+        config.webcam.enabled = false;
+    }
     let session = Session::create()?;
 
     app::ui::banner();
@@ -231,10 +244,12 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
                 plan.scale
             );
             if let Some(mic) = &plan.microphone {
-                println!("  {} {}\n", "voice over".dimmed(), mic.bright_black());
-            } else {
-                println!();
+                println!("  {} {}", "voice over".dimmed(), mic.bright_black());
             }
+            if let Some(cam) = &plan.webcam {
+                println!("  {} {}", "webcam".dimmed(), cam.bright_black());
+            }
+            println!();
         },
         || app::ui::wait_for_stop(cli.seconds),
     )?;

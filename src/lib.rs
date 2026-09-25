@@ -15,6 +15,7 @@
 pub mod camera;
 pub mod capture;
 pub mod config;
+pub mod pip;
 pub mod render;
 pub mod session;
 pub mod tools;

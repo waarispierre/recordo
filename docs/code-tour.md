@@ -18,8 +18,10 @@ Two phases, joined by files on disk:
   ScreenCaptureKit ──► capture.mp4  ┐
   (+ voice over, muxed in)          │
   frame timestamps ──► frames.json  ├──► camera solve ──► GPU composite ──► export.mp4
-  cursor + clicks  ──► telemetry.json│
-  window geometry  ──► meta.json    ┘
+  cursor + clicks  ──► telemetry.json│         ▲
+  window geometry  ──► meta.json    ┘         │
+  AVFoundation     ──► camera.mp4   ──────────┘  (webcam overlay, own timestamps)
+                   ──► camera_frames.json
 ```
 
 `capture.mp4` is the **raw** window recording — real tabs, no styling. `export.mp4` is the
@@ -82,6 +84,8 @@ UI and could be driven by a GUI later.
 | `capture/windows.rs` | Filters the window list to ones worth offering | Yes |
 | `capture/webarea.rs` | Asks a browser via Accessibility where the web page is | Yes |
 | `capture/devices.rs` | Camera/microphone enumeration and permission status (AVFoundation) | Yes |
+| `capture/webcam.rs` | Drives the webcam: `AVCaptureMovieFileOutput` writes `camera.mp4`, a second output logs frame timestamps | Yes |
+| `pip.rs` | Webcam placement (corner + inset + size) and its frame offset against the screen. Pure, unit-tested | No |
 | `session.rs` | Where recordings and config live on disk | No |
 | `config.rs` | The TOML settings file, and `config get`/`set` | No |
 | `render/export.rs` | Render pipeline: ffmpeg → GPU → ffmpeg | No (spawns ffmpeg) |
@@ -232,6 +236,15 @@ this program never touches the samples — the encoder gets a second input strai
 (`-map 0:v:0 -map 1:a:0 -c:a aac`). No separate sync step: the audio already sits on
 ScreenCaptureKit's own timeline, the same one `frames.json` and `telemetry.json` use.
 
+If `camera.mp4` exists and the webcam overlay is enabled, a **third** ffmpeg process
+decodes it — scaled and, for a circle, centre-cropped to square, so the GPU only ever
+uploads a texture already at the overlay's own pixel size. `pip::frame_offset` (in
+`pip.rs`) compares the camera's first frame timestamp against the screen's, both on the
+same host clock, and the render loop either skips that many screen frames before
+compositing the overlay or discards that many leading camera frames — never a guessed
+offset. If the camera stream runs out first, the overlay just stops appearing rather than
+freezing on a stale frame.
+
 ## 6. `camera.rs` — the part that decides how it *feels*
 
 No OS or GPU dependency, so it can be tuned headlessly against recorded fixtures. Two
@@ -308,10 +321,13 @@ from the vertex index) and does all the work per pixel in `fs_main`, in this ord
 4. If chrome is enabled: the title bar strip, three traffic lights, and for browsers a URL
    pill.
 5. The captured content, sampled through the crop window the camera solved.
+6. If the webcam overlay is enabled: its own shadow, the camera frame, and a thin border
+   ring — drawn last, so it always sits above the content.
 
 `rounded_box_sdf` is the standard signed-distance-field rounded rectangle — it returns the
 distance to the shape's edge, which makes both antialiasing and the soft shadow one
-`smoothstep` each.
+`smoothstep` each. It is also what makes the webcam's circle and rounded-rect shapes the
+same code path: a circle is just a radius of half the short side of its rect.
 
 ---
 

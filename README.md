@@ -51,6 +51,7 @@ on one platform.
 | Input Monitoring | click detection | records and pans, but never click-zooms |
 | Accessibility | exact web page bounds | browser pages fall back to a fixed crop guess |
 | Microphone | voice over | recording fails with a clear error, only if `--mic` or `audio.microphone` is on |
+| Camera | webcam overlay | recording continues without the webcam, only if `--webcam` or `webcam.enabled` is on |
 
 Screen Recording requires quitting and reopening your terminal after granting it.
 
@@ -87,6 +88,7 @@ recordo -d              # record the whole display
 recordo -s 10           # stop after 10 seconds
 recordo -z 30           # 30% zoom for this run only
 recordo --mic            # record voice over for this run only
+recordo --webcam         # show the webcam overlay for this run only
 ```
 
 Recording stops on Enter or Ctrl-C. The finished video opens automatically; pass
@@ -97,7 +99,7 @@ capture, its sidecars and the finished `export.mp4`.
 
 ```sh
 recordo windows         # list recordable windows and their ids
-recordo devices         # list microphones (and cameras, once recorded)
+recordo devices         # list microphones and cameras, and the names the config accepts
 recordo list            # list past recordings
 recordo render          # re-render the most recent recording
 recordo render <path>   # re-render a specific one
@@ -201,6 +203,14 @@ The image is scaled to **cover** and centre-cropped, so any aspect ratio works.
 | `style.chrome` | `auto`, `none`, `window` or `browser` |
 | `audio.microphone` | record voice over alongside the screen. Off by default |
 | `audio.device` | which microphone, matched by name. Empty uses the system default |
+| `webcam.enabled` | show a webcam picture-in-picture over the recording. Off by default |
+| `webcam.device` | which camera, matched by name. Empty uses the system default |
+| `webcam.position` | corner it sits in: `bottom-left`, `bottom-right`, `top-left` or `top-right` |
+| `webcam.inset` / `offset` | distance from that corner, and a nudge on top of it, in points |
+| `webcam.size_percent` | height, as a percentage of the exported frame's height |
+| `webcam.shape` | `circle` or `rect` |
+| `webcam.corner_radius` | corner rounding for `rect`; ignored for `circle` |
+| `webcam.mirror` | mirror the image, so it reads the way a mirror does |
 
 All lengths are in **points** and scale with the capture, so the look is identical on
 Retina and non-Retina displays.
@@ -233,6 +243,26 @@ The microphone is captured by the same ScreenCaptureKit stream as the screen, so
 no separate encoding pass and no manual sync: both land in `capture.mp4` on the same
 clock, and `render`/`export` carry the audio through untouched. macOS asks for Microphone
 permission the first time; `doctor` reports whether it is granted.
+
+### Webcam
+
+Off by default, same reasoning as voice over.
+
+```sh
+recordo config set webcam.enabled true
+recordo --webcam -s 30            # or just for this run
+recordo devices                   # see which camera will be used
+recordo config set webcam.device "Desk View Camera"
+recordo config set webcam.position top-right
+recordo config set webcam.shape rect
+```
+
+The camera records to its own `camera.mp4` alongside `capture.mp4`, on the same host
+clock ScreenCaptureKit uses, so the render step lines the two up exactly rather than
+guessing an offset from how long the camera took to start. A camera that is missing, in
+use elsewhere, or denied degrades the recording to screen-only rather than failing it —
+the same way a denied Input Monitoring degrades to "records and pans, never click-zooms".
+`camera.mp4` is removed by `recordo prune` along with the rest of the raw capture.
 
 ## Privacy
 

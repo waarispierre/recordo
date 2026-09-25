@@ -167,13 +167,14 @@ pub fn render(session: &Session, out: &std::path::Path, zoom: Option<f64>) -> Re
 
     let report = result?;
     println!(
-        "  {} {}x{} · {} frames · {:.1}x realtime{}",
+        "  {} {}x{} · {} frames · {:.1}x realtime{}{}",
         "·".bright_black(),
         report.output.0,
         report.output.1,
         report.frames,
         report.realtime_ratio(),
-        if report.audio { " · voice over" } else { "" }
+        if report.audio { " · voice over" } else { "" },
+        if report.webcam { " · webcam" } else { "" }
     );
     if report.crop_source == CropSource::FixedGuess {
         println!(
@@ -217,6 +218,19 @@ pub fn doctor(verbose: bool) -> Result<()> {
         mic_mark,
         "Microphone",
         mic.explain().bright_black()
+    );
+
+    let camera = recordo::capture::devices::camera_access();
+    let camera_mark = if camera.granted() {
+        "✓".green().to_string()
+    } else {
+        "·".dimmed().to_string()
+    };
+    println!(
+        "  {} {:<18} {}",
+        camera_mark,
+        "Camera",
+        camera.explain().bright_black()
     );
 
     // The click tap installs only with Input Monitoring; recording still works without.

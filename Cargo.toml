@@ -44,7 +44,20 @@ foreign-types = "0.5"
 mach2 = "0.5"
 # Camera and microphone: device lists, permission status, and the capture session.
 objc2 = "0.6"
-objc2-av-foundation = { version = "0.3", features = ["AVCaptureDevice", "AVMediaFormat"] }
+objc2-av-foundation = { version = "0.3", features = [
+    "AVCaptureDevice",
+    "AVMediaFormat",
+    "AVCaptureSession",
+    "AVCaptureInput",
+    "AVCaptureOutput",
+    "AVCaptureOutputBase",
+    "AVCaptureFileOutput",
+    "AVCaptureVideoDataOutput",
+    "objc2-core-media",
+    "dispatch2",
+] }
+objc2-core-media = "0.3"
+dispatch2 = "0.3"
 objc2-foundation = "0.3"
 # macos_15_0 gates SCRecordingOutput (direct stream-to-file).
 screencapturekit = { version = "10", features = ["macos_15_0"] }
