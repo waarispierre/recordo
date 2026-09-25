@@ -26,44 +26,21 @@ Update `url` and `sha256` in the formula, commit the tap, done. Users get:
 brew install waarispierre/tap/recordo
 ```
 
-## While the repository is private
+## If the repository ever goes private again
 
-Homebrew can work with a private repo, but only partly, and the halves fail differently.
+Homebrew cannot authenticate HTTPS during a build. Its sandbox denies reading
+`~/Library/Keychains` but passes `SSH_AUTH_SOCK` through, so a git credential helper
+cannot reach its token — Git Credential Manager crashes outright trying to open a GUI the
+sandbox also blocks. An HTTPS clone that works in your shell still fails under
+`brew install`, because the shell is not sandboxed.
 
-**The tap can be private.** `brew tap` accepts an explicit URL over any transport git
-understands, so SSH keys do the authenticating:
+The workaround is a head-only formula using an SSH URL, with a key loaded in the agent
+and `github.com` in `known_hosts`. Miss the second and SSH waits for a fingerprint
+confirmation that `GIT_TERMINAL_PROMPT=0` can never supply, so the install hangs with no
+error at all.
 
-```sh
-brew tap waarispierre/tap git@github.com:waarispierre/homebrew-tap.git
-```
-
-**The source tarball cannot.** A formula's `url` is fetched with curl, which has no GitHub
-credentials, so `https://github.com/.../archive/refs/tags/v0.1.0.tar.gz` returns 404 for a
-private repo. Stable releases therefore do not work while the source is private.
-
-The way round it is a head-only install, which clones over git instead of fetching a
-tarball, so SSH handles auth:
-
-```ruby
-head "git@github.com:waarispierre/recordo.git", branch: "main"
-```
-
-```sh
-brew install --HEAD waarispierre/tap/recordo
-```
-
-That works, but every install builds `main` rather than a pinned release, and `brew
-upgrade` will not see new versions.
-
-**Honestly, while it is private this is more machinery than it is worth.** A direct
-install needs no tap at all:
-
-```sh
-brew install ffmpeg
-cargo install --git ssh://git@github.com/waarispierre/recordo.git
-```
-
-Switch to the tap when the repository goes public and the tarball URL starts resolving.
+Stable releases cannot work privately in any case: a formula's `url` is fetched with
+curl, which holds no credentials, so the tarball 404s.
 
 ## A prerequisite worth knowing
 
