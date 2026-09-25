@@ -9,3 +9,6 @@ meta.json
 
 # Local settings, which may contain a path to a personal background image.
 recordo.toml
+
+# Compiled CI helper, if built rather than `go run`.
+ci/ci

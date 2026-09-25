@@ -105,8 +105,11 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     } else if (u.chrome_height > 0.0) {
         // Traffic lights, evenly spaced from the left.
         let cy = win_min.y + u.chrome_height * 0.5;
-        let r = min(6.5, u.chrome_height * 0.16);
-        let gap = r * 3.2;
+        // Sized from the bar height rather than a fixed pixel cap: chrome_height is in
+        // output pixels, so a constant would halve the dots on a Retina capture. macOS
+        // draws roughly 12pt dots spaced 20pt apart in a ~28pt bar.
+        let r = u.chrome_height * 0.19;
+        let gap = r * 3.1;
         let x0 = win_min.x + gap + r;
         window_color = mix(window_color, vec4<f32>(1.0, 0.37, 0.34, 1.0),
             circle(p, vec2<f32>(x0, cy), r));

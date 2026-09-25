@@ -17,6 +17,32 @@ reports what is missing.
 
 ## Before opening a pull request
 
+Run the whole of CI locally — the same program GitHub runs:
+
+```sh
+go run ./ci
+```
+
+It needs Go and a running Docker daemon, and takes about a minute. Add `-v` to see
+Dagger's full build log.
+
+```sh
+go run ./ci -only=portable   # containers only: format, licences, deps, shell
+go run ./ci -only=native     # macOS only: clippy, tests, release build, no-network
+```
+
+### Why the pipeline is split
+
+recordo compiles only on macOS: it links ScreenCaptureKit, builds a Swift shim and
+renders through Metal, none of which exist in a Linux container. So the checks that
+*can* be hermetic run in containers through Dagger, and the ones that genuinely need a
+Mac run natively on the host.
+
+`go run ./ci` on a Mac runs both, which is the full pipeline. On Linux the native half
+is skipped with a notice rather than a confusing compile error.
+
+If you prefer the underlying commands:
+
 ```sh
 cargo fmt --all
 cargo clippy --all-targets   # must be clean, CI denies warnings

@@ -190,6 +190,8 @@ every run, rather than leaving it as a promise.
 cargo build --release && ./scripts/check-local-only.sh
 ```
 
+The same check runs in CI, which you can reproduce locally with `go run ./ci`.
+
 Recordings live in `~/Movies/Recordo/`, created `0700` with every file `0600`, so
 other accounts on the machine cannot read them. The config directory is the same.
 

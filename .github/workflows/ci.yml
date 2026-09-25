@@ -5,52 +5,45 @@ on:
     branches: [main]
   pull_request:
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
-
+# Both jobs run the same program as `go run ./ci` does locally, so a green run here and
+# a green run on a laptop mean the same thing.
+#
+# They are split by necessity rather than preference: the portable half needs a container
+# runtime, which GitHub's macOS runners do not provide, and the native half needs macOS,
+# which no container can offer.
 jobs:
-  test:
-    # ScreenCaptureKit and the Accessibility API are macOS-only, so there is no other
-    # target to build for.
-    runs-on: macos-14
+  portable:
+    name: portable checks (Dagger)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: ci/go.sum
+
+      # Formatting, licences, dependency policy and shell linting, all in containers.
+      - run: go run ./ci -only=portable
+
+  native:
+    name: native checks (macOS)
+    # macOS 15: the capture path uses SCRecordingOutput, which is not available earlier.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: cargo fmt --all --check
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache-dependency-path: ci/go.sum
 
-      - name: Clippy
-        run: cargo clippy --all-targets --all-features
-
-      - name: Test
-        run: cargo test --all-features
-
-      - name: Build release
-        run: cargo build --release
-
-      # The project's central promise is that nothing leaves the machine. Asserting it
-      # on every build is the only way it stays true.
-      - name: Verify no network capability
-        run: ./scripts/check-local-only.sh
-
-  licenses:
-    runs-on: macos-14
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
-
-      # Fails if a dependency introduces a copyleft licence. FFmpeg is executed as a
-      # subprocess and never linked, so no GPL code may enter the binary.
-      - name: Check licences and advisories
-        run: cargo deny check
+      # Clippy, tests, release build, and the assertion that the built binary has no
+      # path to the network.
+      - run: go run ./ci -only=native
