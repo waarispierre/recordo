@@ -20,14 +20,14 @@ reports what is missing.
 Run the whole of CI locally — the same program GitHub runs:
 
 ```sh
-go run ./ci
+go run ci/main.go
 ```
 
 Needs only Go; takes about twenty seconds.
 
 ```sh
-go run ./ci -only=portable   # format, licences, dependency policy, shell lint
-go run ./ci -only=native     # clippy, tests, release build, no-network assertion
+go run ci/main.go -only=portable   # format, licences, dependency policy, shell lint
+go run ci/main.go -only=native     # clippy, tests, release build, no-network assertion
 ```
 
 ### Why the pipeline is split

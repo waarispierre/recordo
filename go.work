@@ -1,6 +1,0 @@
-// Lets `go run ./ci` work from the repository root, keeping the CI program's
-// dependencies isolated in ci/go.mod rather than adding a Go module to the root of a
-// Rust project.
-go 1.24
-
-use ./ci
