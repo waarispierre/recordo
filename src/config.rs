@@ -28,6 +28,9 @@ pub struct CameraSettings {
     pub zoom_out_s: f64,
     /// Cursor-follow spring frequency in Hz; higher tracks more tightly.
     pub follow_hz: f64,
+    /// Radius of the deadzone around the camera centre, as a percentage of the visible
+    /// width. Cursor movement inside it is ignored. 0 follows continuously.
+    pub follow_deadzone_percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +69,7 @@ impl Default for CameraSettings {
             hold_s: d.hold_s,
             zoom_out_s: d.zoom_out_s,
             follow_hz: d.follow_hz,
+            follow_deadzone_percent: d.follow_deadzone_percent,
         }
     }
 }
@@ -128,6 +132,17 @@ impl Config {
         }
         let text =
             std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+
+        // A config written by an earlier version is missing anything added since. Serde
+        // would silently default those fields, but `config show`, `config set` and the
+        // settings pane all read the file itself — so a new option would be invisible
+        // and unsettable until the file was deleted. Fill the gaps instead.
+        if let Some(migrated) = add_missing_settings(&text)? {
+            std::fs::write(path, &migrated)
+                .with_context(|| format!("update {}", path.display()))?;
+            return toml::from_str(&migrated).with_context(|| format!("parse {}", path.display()));
+        }
+
         toml::from_str(&text).with_context(|| format!("parse {}", path.display()))
     }
 
@@ -139,6 +154,9 @@ impl Config {
             hold_s: c.hold_s.max(0.0),
             zoom_out_s: c.zoom_out_s.max(0.01),
             follow_hz: c.follow_hz.max(0.05),
+            // Above 50% the boundary would exceed the visible frame and the camera
+            // could never move at all.
+            follow_deadzone_percent: c.follow_deadzone_percent.clamp(0.0, 50.0),
         }
     }
 
@@ -213,6 +231,12 @@ hold_s = 1.3
 zoom_out_s = 0.7
 # Cursor-follow spring frequency (Hz). Higher tracks more tightly, lower feels calmer.
 follow_hz = 1.1
+
+# How far the cursor may wander before the camera follows it, as a percentage of the
+# visible width. The camera ignores everything inside this circle, so small movements
+# while pointing or reading do not make it drift. Raise it for a calmer camera, set it
+# to 0 to follow continuously.
+follow_deadzone_percent = 10.0
 
 [style]
 # All lengths below are in POINTS and scale with the capture, so the look is the same
@@ -375,6 +399,52 @@ pub fn settings(path: &Path) -> Result<Vec<Setting>> {
     Ok(out)
 }
 
+/// Adds any setting present in the defaults but absent from `text`, returning the new
+/// contents, or None when nothing was missing.
+///
+/// Existing values and comments are left exactly as they are; only gaps are filled, and
+/// each added key brings its explanatory comment with it.
+fn add_missing_settings(text: &str) -> Result<Option<String>> {
+    let mut doc: toml_edit::DocumentMut = text.parse().context("parse config")?;
+    let defaults: toml_edit::DocumentMut = DEFAULT_TOML
+        .parse()
+        .expect("the built-in defaults must parse");
+
+    let mut changed = false;
+    for (section_name, section) in defaults.iter() {
+        let Some(default_table) = section.as_table() else {
+            continue;
+        };
+
+        if doc.get(section_name).is_none() {
+            doc.insert(
+                section_name,
+                toml_edit::Item::Table(toml_edit::Table::new()),
+            );
+            changed = true;
+        }
+        let Some(target) = doc.get_mut(section_name).and_then(|i| i.as_table_mut()) else {
+            continue;
+        };
+
+        for (key, value) in default_table.iter() {
+            if target.contains_key(key) {
+                continue;
+            }
+            target.insert(key, value.clone());
+            // Carry the comment across, so a migrated file reads like a fresh one.
+            if let (Some(source_key), Some(mut added)) =
+                (default_table.key(key), target.key_mut(key))
+            {
+                *added.leaf_decor_mut() = source_key.leaf_decor().clone();
+            }
+            changed = true;
+        }
+    }
+
+    Ok(changed.then(|| doc.to_string()))
+}
+
 /// A `[r, g, b]` setting parsed back into 0-255 components, for showing a swatch.
 pub fn parse_rgb(value: &str) -> Option<(u8, u8, u8)> {
     let inner = value.trim().strip_prefix('[')?.strip_suffix(']')?;
@@ -430,6 +500,44 @@ pub fn is_colour_key(key: &str) -> bool {
         key,
         "style.bg_top" | "style.bg_bottom" | "style.chrome_bg" | "style.pill_color"
     )
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+
+    #[test]
+    fn missing_settings_are_added_with_their_comments() {
+        // A config as an older version would have written it: valid, but predating
+        // follow_deadzone_percent.
+        let old = "[camera]\nzoom_percent = 30.0\n\n[style]\npadding = 48.0\n";
+        let migrated = add_missing_settings(old)
+            .unwrap()
+            .expect("should need migrating");
+
+        assert!(migrated.contains("follow_deadzone_percent"));
+        // The explanation travels with the key, so a migrated file reads like a fresh one.
+        assert!(migrated.contains("How far the cursor may wander"));
+        // An existing value is never overwritten by the default.
+        assert!(migrated.contains("zoom_percent = 30.0"));
+        // And the result is still loadable.
+        let parsed: Config = toml::from_str(&migrated).unwrap();
+        assert_eq!(parsed.camera.zoom_percent, 30.0);
+    }
+
+    #[test]
+    fn a_complete_config_is_left_alone() {
+        // No rewrite, so a file the user has formatted by hand is not churned.
+        assert!(add_missing_settings(DEFAULT_TOML).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_missing_section_is_created() {
+        let only_camera = "[camera]\nzoom_percent = 45.0\n";
+        let migrated = add_missing_settings(only_camera).unwrap().unwrap();
+        assert!(migrated.contains("[style]"));
+        assert!(toml::from_str::<Config>(&migrated).is_ok());
+    }
 }
 
 #[cfg(test)]

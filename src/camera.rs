@@ -23,6 +23,9 @@ pub struct CameraConfig {
     pub zoom_out_s: f64,
     /// Spring frequency in Hz — higher follows the cursor more tightly.
     pub follow_hz: f64,
+    /// Radius of the deadzone around the camera centre, as a percentage of the visible
+    /// width. The camera ignores cursor movement inside it. 0 follows continuously.
+    pub follow_deadzone_percent: f64,
 }
 
 impl Default for CameraConfig {
@@ -33,6 +36,7 @@ impl Default for CameraConfig {
             hold_s: 1.30,
             zoom_out_s: 0.70,
             follow_hz: 1.1,
+            follow_deadzone_percent: 10.0,
         }
     }
 }
@@ -135,15 +139,34 @@ pub fn solve(
         let dt = ((t as i128 - last_t as i128) as f64 / 1e9).clamp(0.0, 0.1);
         last_t = t;
 
-        // Semi-implicit Euler on a critically damped spring.
-        vx += (-2.0 * omega * vx - omega * omega * (cx - tx)) * dt;
-        vy += (-2.0 * omega * vy - omega * omega * (cy - ty)) * dt;
-        cx += vx * dt;
-        cy += vy * dt;
-
+        // Zoom is resolved before the follow so the deadzone can be sized against the
+        // visible area rather than the source. Scaled that way, the boundary covers the
+        // same portion of the exported frame at every zoom level, which is what makes it
+        // feel consistent.
         let env = envelope_at(&clicks, t, cfg);
         let zoom = 1.0 + (cfg.max_zoom - 1.0) * env;
         let (cw, ch) = (width / zoom, height / zoom);
+
+        // Deadzone: the camera ignores the cursor until it leaves a circle of this radius
+        // around the current centre, then moves only far enough to put it back on the
+        // boundary. Following the cursor exactly makes the camera twitch at every small
+        // movement; trailing by the radius keeps it still during ordinary pointing and
+        // still tracks a deliberate traverse.
+        let deadzone = cw * (cfg.follow_deadzone_percent.max(0.0) / 100.0);
+        let (dx, dy) = (tx - cx, ty - cy);
+        let distance = dx.hypot(dy);
+        let (goal_x, goal_y) = if distance <= deadzone || distance == 0.0 {
+            (cx, cy)
+        } else {
+            let pull = (distance - deadzone) / distance;
+            (cx + dx * pull, cy + dy * pull)
+        };
+
+        // Semi-implicit Euler on a critically damped spring.
+        vx += (-2.0 * omega * vx - omega * omega * (cx - goal_x)) * dt;
+        vy += (-2.0 * omega * vy - omega * omega * (cy - goal_y)) * dt;
+        cx += vx * dt;
+        cy += vy * dt;
 
         // Blend toward frame centre as we zoom out, so an idle recording sits still.
         let ccx = width / 2.0 + (cx - width / 2.0) * env;
@@ -257,6 +280,87 @@ mod tests {
             (crops.last().unwrap().w - W).abs() < 1.0,
             "should return to full frame, got {:?}",
             crops.last()
+        );
+    }
+
+    #[test]
+    fn deadzone_holds_the_camera_for_small_movements() {
+        let cfg = CameraConfig {
+            follow_deadzone_percent: 10.0,
+            ..Default::default()
+        };
+        // Clicks every 300ms hold the zoom envelope at full, so what is measured is the
+        // deadzone rather than the camera recentring as the zoom decays.
+        let mut events: Vec<_> = (0..10)
+            .map(|i| ev(i * 300, EventKind::Down, W / 2.0, H / 2.0))
+            .collect();
+        // Jitter well inside the boundary: 10% of a 1043px crop is ~104px radius.
+        for i in 0..200 {
+            let nudge = if i % 2 == 0 { -30.0 } else { 30.0 };
+            events.push(ev(i * 10, EventKind::Move, W / 2.0 + nudge, H / 2.0));
+        }
+        events.sort_by_key(|e| e.t_ns);
+        let crops = solve(&tel(events), &frames(180, 60), W, H, &cfg);
+
+        // Settled centre should not wander once the zoom has stabilised.
+        let tail = &crops[90..];
+        let min_x = tail.iter().map(|c| c.x).fold(f64::MAX, f64::min);
+        let max_x = tail.iter().map(|c| c.x).fold(f64::MIN, f64::max);
+        assert!(
+            max_x - min_x < 1.0,
+            "camera drifted {:.1}px for movement inside the deadzone",
+            max_x - min_x
+        );
+    }
+
+    #[test]
+    fn deadzone_still_follows_a_deliberate_traverse() {
+        let cfg = CameraConfig {
+            follow_deadzone_percent: 10.0,
+            ..Default::default()
+        };
+        let mut events: Vec<_> = (0..10)
+            .map(|i| ev(i * 300, EventKind::Down, W / 2.0, H / 2.0))
+            .collect();
+        // Walk the cursor far across the frame, well beyond any plausible boundary.
+        for i in 0..150 {
+            let x = W / 2.0 + (i as f64) * 3.0;
+            events.push(ev(i * 10, EventKind::Move, x.min(W - 10.0), H / 2.0));
+        }
+        events.sort_by_key(|e| e.t_ns);
+        let crops = solve(&tel(events), &frames(180, 60), W, H, &cfg);
+
+        let travelled = crops.last().unwrap().x - crops[0].x;
+        assert!(
+            travelled > 100.0,
+            "camera should track a deliberate traverse, moved only {travelled:.1}px"
+        );
+    }
+
+    #[test]
+    fn zero_deadzone_follows_continuously() {
+        // The escape hatch has to actually disable the feature.
+        let cfg = CameraConfig {
+            follow_deadzone_percent: 0.0,
+            ..Default::default()
+        };
+        let mut events: Vec<_> = (0..10)
+            .map(|i| ev(i * 300, EventKind::Down, W / 2.0, H / 2.0))
+            .collect();
+        for i in 0..200 {
+            let nudge = if i % 2 == 0 { -30.0 } else { 30.0 };
+            events.push(ev(i * 10, EventKind::Move, W / 2.0 + nudge, H / 2.0));
+        }
+        events.sort_by_key(|e| e.t_ns);
+        let crops = solve(&tel(events), &frames(180, 60), W, H, &cfg);
+
+        let tail = &crops[90..];
+        let min_x = tail.iter().map(|c| c.x).fold(f64::MAX, f64::min);
+        let max_x = tail.iter().map(|c| c.x).fold(f64::MIN, f64::max);
+        assert!(
+            max_x - min_x > 1.0,
+            "without a deadzone the camera should chase the jitter, moved {:.2}px",
+            max_x - min_x
         );
     }
 
