@@ -50,7 +50,7 @@ var portable = []check{
 	},
 	{
 		name:    "shell",
-		argv:    []string{"shellcheck", "scripts/check-local-only.sh"},
+		argv:    []string{"shellcheck", "install.sh", "scripts/check-local-only.sh"},
 		tool:    "shellcheck",
 		install: "brew install shellcheck",
 	},

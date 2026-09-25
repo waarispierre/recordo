@@ -15,22 +15,32 @@ macOS 26 (Tahoe) or later. See [why 26 and not 15](CONTRIBUTING.md#getting-set-u
 ## Install
 
 ```sh
-brew install waarispierre/tap/recordo
+git clone https://github.com/waarispierre/recordo.git
+cd recordo
+./install.sh
 ```
 
-That pulls in FFmpeg too. Then check permissions:
+The installer checks prerequisites before building, so a missing dependency surfaces
+immediately rather than four minutes into a compile. Then:
 
 ```sh
 recordo doctor
 ```
 
-<details>
-<summary>From source</summary>
+You need [Rust](https://rustup.rs) to build and FFmpeg to render:
 
 ```sh
-brew install ffmpeg          # required at runtime
-cargo install --path cli
+brew install ffmpeg
 ```
+
+<details>
+<summary>Why not Homebrew?</summary>
+
+A tap would mean a second repository to maintain, a release process, and — because
+Homebrew builds inside a sandbox that SwiftPM's own sandbox cannot nest within — a shim
+that disabled a layer of build isolation. That is a poor trade this early for one binary
+on one platform.
+
 </details>
 
 `doctor` checks permissions and tooling and prints where settings and videos live.
@@ -236,7 +246,7 @@ at your option.
 
 recordo **executes** `ffmpeg` as a separate process and never links against it, so
 FFmpeg's GPL licence does not extend to this project. No FFmpeg binary or library is
-bundled or redistributed here — Homebrew installs it separately.
+bundled or redistributed here — you install it separately.
 
 Video is encoded with `h264_videotoolbox`, the hardware encoder built into macOS, so
 H.264 patent licensing is covered by Apple's operating system rather than by this
