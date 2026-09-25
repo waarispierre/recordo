@@ -34,6 +34,13 @@ struct Uniforms {
     bg_image_size: [f32; 2],
     use_bg_image: f32,
     _pad2: f32,
+    // Webcam overlay: rect in output pixels (xy = origin, zw = size), corner radius in
+    // output pixels (half the short side gives a circle from the same SDF the window
+    // uses), and whether a frame was uploaded this call.
+    cam_rect: [f32; 4],
+    cam_radius: f32,
+    cam_enabled: f32,
+    _pad3: [f32; 2],
 }
 
 /// Synthetic window frame drawn around the capture.
@@ -112,6 +119,20 @@ impl Default for Style {
     }
 }
 
+/// Placement and decode size of the webcam overlay, resolved before the renderer is
+/// built, since texture creation is fixed-size. `width`/`height` are also the pixel
+/// dimensions the caller must decode the camera video to.
+#[derive(Debug, Clone, Copy)]
+pub struct WebcamGeometry {
+    pub width: u32,
+    pub height: u32,
+    /// Output-pixel rect: xy = origin, zw = size.
+    pub rect: [f32; 4],
+    /// Output pixels. Half the short side of `rect` gives a circle from the same SDF the
+    /// window body uses; a smaller value gives a rounded rectangle.
+    pub radius: f32,
+}
+
 /// Decoded background image: RGBA pixels plus dimensions.
 pub struct BackgroundImage {
     pub rgba: Vec<u8>,
@@ -151,6 +172,8 @@ pub struct Renderer {
     style: Style,
     bg_size: [f32; 2],
     use_bg_image: f32,
+    cam_tex: wgpu::Texture,
+    cam: Option<WebcamGeometry>,
 }
 
 /// Output dimensions that hold the content at 1:1 plus chrome and padding.
@@ -169,6 +192,7 @@ impl Renderer {
         out_h: u32,
         style: Style,
         background: Option<BackgroundImage>,
+        cam: Option<WebcamGeometry>,
     ) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -246,6 +270,26 @@ impl Renderer {
         let bg_view = bg_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let use_bg_image = if background.is_some() { 1.0 } else { 0.0 };
 
+        // Sized to the camera's own decode resolution when enabled, or a 1x1 dummy when
+        // not — the same pattern as `bg_tex` above. Unlike the background, this one is
+        // uploaded fresh every frame, since it is a video, not a static image.
+        let (cam_w, cam_h) = cam.map_or((1, 1), |g| (g.width.max(1), g.height.max(1)));
+        let cam_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("webcam"),
+            size: wgpu::Extent3d {
+                width: cam_w,
+                height: cam_h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let cam_view = cam_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("linear-clamp"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -277,6 +321,10 @@ impl Renderer {
                 bg_image_size: [bg_w as f32, bg_h as f32],
                 use_bg_image,
                 _pad2: 0.0,
+                cam_rect: cam.map_or([0.0; 4], |g| g.rect),
+                cam_radius: cam.map_or(0.0, |g| g.radius),
+                cam_enabled: 0.0,
+                _pad3: [0.0; 2],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -320,6 +368,16 @@ impl Renderer {
                     },
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 4,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -342,6 +400,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&bg_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&cam_view),
                 },
             ],
         });
@@ -430,6 +492,8 @@ impl Renderer {
             style,
             bg_size: [bg_w as f32, bg_h as f32],
             use_bg_image,
+            cam_tex,
+            cam,
         })
     }
 
@@ -438,8 +502,17 @@ impl Renderer {
     }
 
     /// Composites one source frame. `src_rgba` must be `src_w * src_h * 4` bytes;
-    /// `out` is overwritten with `out_w * out_h * 4` bytes.
-    pub fn render(&self, src_rgba: &[u8], crop: Crop, out: &mut Vec<u8>) -> Result<()> {
+    /// `out` is overwritten with `out_w * out_h * 4` bytes. `cam_rgba`, when the webcam
+    /// overlay is enabled, must be exactly the geometry's `width * height * 4` bytes;
+    /// `None` for a frame (the camera track ran out, or never started) simply leaves the
+    /// overlay off for that frame rather than freezing a stale picture on screen.
+    pub fn render(
+        &self,
+        src_rgba: &[u8],
+        crop: Crop,
+        cam_rgba: Option<&[u8]>,
+        out: &mut Vec<u8>,
+    ) -> Result<()> {
         let expected = (self.src_w * self.src_h * 4) as usize;
         if src_rgba.len() != expected {
             return Err(anyhow!(
@@ -468,6 +541,31 @@ impl Renderer {
             },
         );
 
+        let cam_enabled = if let (Some(rgba), Some(geo)) = (cam_rgba, self.cam) {
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.cam_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(geo.width * 4),
+                    rows_per_image: Some(geo.height),
+                },
+                wgpu::Extent3d {
+                    width: geo.width,
+                    height: geo.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            1.0
+        } else {
+            0.0
+        };
+
         let u = Uniforms {
             crop: [
                 (crop.x / self.src_w as f64) as f32,
@@ -491,6 +589,10 @@ impl Renderer {
             bg_image_size: self.bg_size,
             use_bg_image: self.use_bg_image,
             _pad2: 0.0,
+            cam_rect: self.cam.map_or([0.0; 4], |g| g.rect),
+            cam_radius: self.cam.map_or(0.0, |g| g.radius),
+            cam_enabled,
+            _pad3: [0.0; 2],
         };
         self.queue
             .write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&u));

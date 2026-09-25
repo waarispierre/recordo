@@ -130,6 +130,12 @@ impl Session {
     pub fn export(&self) -> PathBuf {
         self.dir.join("export.mp4")
     }
+    pub fn camera(&self) -> PathBuf {
+        self.dir.join("camera.mp4")
+    }
+    pub fn camera_frames(&self) -> PathBuf {
+        self.dir.join("camera_frames.json")
+    }
 
     pub fn has_export(&self) -> bool {
         self.export().exists()
@@ -137,20 +143,34 @@ impl Session {
 
     /// Bytes held by the raw capture and its sidecars — everything `prune` would remove.
     pub fn raw_bytes(&self) -> u64 {
-        [self.capture(), self.telemetry(), self.frames()]
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum()
+        [
+            self.capture(),
+            self.telemetry(),
+            self.frames(),
+            self.camera(),
+            self.camera_frames(),
+        ]
+        .iter()
+        .filter_map(|p| std::fs::metadata(p).ok())
+        .map(|m| m.len())
+        .sum()
     }
 
     /// Deletes the raw capture and its sidecars, keeping the rendered video.
     ///
     /// The raw capture is the unredacted one: for a browser it still contains the tab
     /// strip, address bar and bookmarks that the render deliberately removes. Keeping it
-    /// forever means the redaction only ever applied to the copy you share.
+    /// forever means the redaction only ever applied to the copy you share. `camera.mp4`,
+    /// when present, is the most personal file in the folder — a raw recording of your
+    /// face — so leaving it out here would be a privacy bug, not just an oversight.
     pub fn drop_raw(&self) -> Result<()> {
-        for path in [self.capture(), self.telemetry(), self.frames()] {
+        for path in [
+            self.capture(),
+            self.telemetry(),
+            self.frames(),
+            self.camera(),
+            self.camera_frames(),
+        ] {
             if path.exists() {
                 std::fs::remove_file(&path)
                     .with_context(|| format!("remove {}", path.display()))?;

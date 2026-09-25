@@ -6,9 +6,11 @@
 //! changing anything above.
 
 pub mod clock;
+pub mod devices;
 pub mod frames;
 pub mod recorder;
 pub mod telemetry;
+pub mod webcam;
 pub mod windows;
 
 #[cfg(target_os = "macos")]

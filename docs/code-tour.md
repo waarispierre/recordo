@@ -16,9 +16,12 @@ Two phases, joined by files on disk:
   PHASE 1: record                      PHASE 2: render
   ───────────────                      ───────────────
   ScreenCaptureKit ──► capture.mp4  ┐
+  (+ voice over, muxed in)          │
   frame timestamps ──► frames.json  ├──► camera solve ──► GPU composite ──► export.mp4
-  cursor + clicks  ──► telemetry.json│
-  window geometry  ──► meta.json    ┘
+  cursor + clicks  ──► telemetry.json│         ▲
+  window geometry  ──► meta.json    ┘         │
+  AVFoundation     ──► camera.mp4   ──────────┘  (webcam overlay, own timestamps)
+                   ──► camera_frames.json
 ```
 
 `capture.mp4` is the **raw** window recording — real tabs, no styling. `export.mp4` is the
@@ -43,17 +46,21 @@ to prove the alignment held on a given recording; if that ever fails, the design
 
 ## 3. Repo layout
 
+A single crate, not a workspace:
+
 ```
-Cargo.toml              workspace root — lists `cli` as its only member
-cli/
-  Cargo.toml            the actual package: name `recordo`
-  build.rs              finds the Swift runtime on Command-Line-Tools-only machines
-  src/
-    lib.rs              declares the modules — this is the library
-    main.rs             the CLI binary (argument parsing, subcommands)
-    ui.rs               terminal output: picker, spinner, doctor, health report
-    ...                 the modules below
-    bin/webprobe.rs     a second, standalone diagnostic binary
+Cargo.toml               the package: name `recordo`
+build.rs                 finds the Swift runtime on Command-Line-Tools-only machines
+src/
+  lib.rs                 declares the modules — this is the library
+  main.rs                the CLI binary (argument parsing, subcommands)
+  app/
+    ui.rs                terminal output: picker, spinner, doctor, health report
+    tui.rs, mod.rs       the full-screen app
+  capture/               everything OS-dependent — see the module map below
+  camera.rs, config.rs, session.rs, tools.rs
+  render/
+    mod.rs, export.rs, shader.wgsl
 ```
 
 `lib.rs` contains nothing but `pub mod camera;` and friends. That's Rust's module
@@ -70,17 +77,20 @@ UI and could be driven by a GUI later.
 | Module | Job | OS-dependent? |
 |---|---|---|
 | `camera.rs` | **The heart.** Telemetry → one crop rectangle per output frame. | No — pure math, unit-tested |
-| `clock.rs` | mach absolute time → nanoseconds | Thin FFI |
-| `recorder.rs` | Drives ScreenCaptureKit: plan, record, health-check | Yes |
-| `telemetry.rs` | Cursor polling + click event tap | Yes |
-| `frames.rs` | Logs each frame's display timestamp as it arrives | Yes |
-| `pick.rs` | Filters the window list to ones worth offering | Yes |
-| `webarea.rs` | Asks a browser via Accessibility where the web page is | Yes |
+| `capture/clock.rs` | mach absolute time → nanoseconds | Thin FFI |
+| `capture/recorder.rs` | Drives ScreenCaptureKit: plan, record, health-check | Yes |
+| `capture/telemetry.rs` | Cursor polling + click event tap | Yes |
+| `capture/frames.rs` | Logs each frame's display timestamp as it arrives | Yes |
+| `capture/windows.rs` | Filters the window list to ones worth offering | Yes |
+| `capture/webarea.rs` | Asks a browser via Accessibility where the web page is | Yes |
+| `capture/devices.rs` | Camera/microphone enumeration and permission status (AVFoundation) | Yes |
+| `capture/webcam.rs` | Drives the webcam: `AVCaptureMovieFileOutput` writes `camera.mp4`, a second output logs frame timestamps | Yes |
+| `pip.rs` | Webcam placement (corner + inset + size) and its frame offset against the screen. Pure, unit-tested | No |
 | `session.rs` | Where recordings and config live on disk | No |
 | `config.rs` | The TOML settings file, and `config get`/`set` | No |
-| `exporter.rs` | Render pipeline: ffmpeg → GPU → ffmpeg | No (spawns ffmpeg) |
-| `render.rs` | wgpu compositor setup and per-frame draw | GPU |
-| `shader.wgsl` | The actual pixel work | GPU |
+| `render/export.rs` | Render pipeline: ffmpeg → GPU → ffmpeg | No (spawns ffmpeg) |
+| `render/mod.rs` | wgpu compositor setup and per-frame draw | GPU |
+| `render/shader.wgsl` | The actual pixel work | GPU |
 
 ---
 
@@ -220,6 +230,21 @@ Two ffmpeg processes with this program in the middle, one frame at a time. A sho
 read (`UnexpectedEof`) just means the stream ended. `h264_videotoolbox` is hardware
 encoding, which is why the export beats real time.
 
+If `capture.mp4` carries a voice-over track — ScreenCaptureKit muxed it in at record time,
+this program never touches the samples — the encoder gets a second input straight from
+`capture.mp4` and maps its audio stream alongside the freshly composited video
+(`-map 0:v:0 -map 1:a:0 -c:a aac`). No separate sync step: the audio already sits on
+ScreenCaptureKit's own timeline, the same one `frames.json` and `telemetry.json` use.
+
+If `camera.mp4` exists and the webcam overlay is enabled, a **third** ffmpeg process
+decodes it — scaled and, for a circle, centre-cropped to square, so the GPU only ever
+uploads a texture already at the overlay's own pixel size. `pip::frame_offset` (in
+`pip.rs`) compares the camera's first frame timestamp against the screen's, both on the
+same host clock, and the render loop either skips that many screen frames before
+compositing the overlay or discards that many leading camera frames — never a guessed
+offset. If the camera stream runs out first, the overlay just stops appearing rather than
+freezing on a stale frame.
+
 ## 6. `camera.rs` — the part that decides how it *feels*
 
 No OS or GPU dependency, so it can be tuned headlessly against recorded fixtures. Two
@@ -296,10 +321,13 @@ from the vertex index) and does all the work per pixel in `fs_main`, in this ord
 4. If chrome is enabled: the title bar strip, three traffic lights, and for browsers a URL
    pill.
 5. The captured content, sampled through the crop window the camera solved.
+6. If the webcam overlay is enabled: its own shadow, the camera frame, and a thin border
+   ring — drawn last, so it always sits above the content.
 
 `rounded_box_sdf` is the standard signed-distance-field rounded rectangle — it returns the
 distance to the shape's edge, which makes both antialiasing and the soft shadow one
-`smoothstep` each.
+`smoothstep` each. It is also what makes the webcam's circle and rounded-rect shapes the
+same code path: a circle is just a radius of half the short side of its rect.
 
 ---
 

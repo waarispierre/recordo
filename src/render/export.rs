@@ -8,11 +8,13 @@ use crate::capture::clock;
 use crate::capture::frames::FrameRecord;
 use crate::capture::telemetry::Telemetry;
 use crate::config::Config;
+use crate::pip::{self, Corner};
 use crate::render::Chrome;
-use crate::render::{self as render, BackgroundImage, Renderer};
+use crate::render::{self as render, BackgroundImage, Renderer, WebcamGeometry};
 use anyhow::{Context, Result, anyhow};
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 
 const FPS: u64 = 60;
 
@@ -28,6 +30,10 @@ pub struct Report {
     /// How the browser page region was determined, if at all.
     pub crop_source: CropSource,
     pub app_name: String,
+    /// Whether a voice-over track was carried through into the export.
+    pub audio: bool,
+    /// Whether the webcam overlay was composited into the export.
+    pub webcam: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,7 +206,32 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
 
     let (content_w_px, content_h_px) = (content.w.round() as u32, content.h.round() as u32);
     let (out_w, out_h) = render::output_size(content_w_px, content_h_px, &style);
-    let renderer = Renderer::new(w, h, out_w, out_h, style, background)?;
+
+    let webcam_cfg = config.webcam();
+    let camera_path = sidecar("camera.mp4");
+    let webcam_setup = if webcam_cfg.enabled && camera_path.exists() {
+        resolve_webcam(
+            &webcam_cfg,
+            &camera_path,
+            &sidecar("camera_frames.json"),
+            out_w,
+            out_h,
+            point_scale as f32,
+            base_t,
+        )?
+    } else {
+        None
+    };
+
+    let renderer = Renderer::new(
+        w,
+        h,
+        out_w,
+        out_h,
+        style,
+        background,
+        webcam_setup.as_ref().map(|s| s.geometry),
+    )?;
 
     let ffmpeg = crate::tools::require("ffmpeg")?;
     let mut decoder = Command::new(&ffmpeg)
@@ -228,37 +259,81 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         .spawn()
         .context("spawn ffmpeg decoder")?;
 
+    // Composited frames arrive on stdin; the voice over is copied across from the capture
+    // as a second input. Its timestamps are ScreenCaptureKit's own, on the same timeline
+    // as the video it was recorded with, so no offset has to be applied here.
+    let audio = has_audio(src)?;
+    let size = format!("{out_w}x{out_h}");
+    let fps = FPS.to_string();
+    let mut enc_args: Vec<&str> = vec![
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file,pipe,fd",
+        "-y",
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgba",
+        "-s",
+        &size,
+        "-r",
+        &fps,
+        "-i",
+        "-",
+    ];
+    if audio {
+        enc_args.extend(["-i", src, "-map", "0:v:0", "-map", "1:a:0"]);
+    }
+    enc_args.extend([
+        "-c:v",
+        "h264_videotoolbox",
+        "-b:v",
+        "12M",
+        "-pix_fmt",
+        "yuv420p",
+    ]);
+    if audio {
+        // The capture runs a little past the last composited frame, so without -shortest
+        // the export ends on a still image with the audio still playing.
+        enc_args.extend(["-c:a", "aac", "-b:a", "128k", "-shortest"]);
+    }
+    enc_args.push(dst);
+
     let mut encoder = Command::new(&ffmpeg)
-        .args([
-            "-v",
-            "error",
-            "-protocol_whitelist",
-            "file,pipe,fd",
-            "-y",
-            "-f",
-            "rawvideo",
-            "-pix_fmt",
-            "rgba",
-            "-s",
-            &format!("{out_w}x{out_h}"),
-            "-r",
-            &FPS.to_string(),
-            "-i",
-            "-",
-            "-c:v",
-            "h264_videotoolbox",
-            "-b:v",
-            "12M",
-            "-pix_fmt",
-            "yuv420p",
-            dst,
-        ])
+        .args(&enc_args)
         .stdin(Stdio::piped())
         .spawn()
         .context("spawn ffmpeg encoder")?;
 
     let mut dec_out = decoder.stdout.take().unwrap();
     let mut enc_in = encoder.stdin.take().unwrap();
+
+    // Camera frames are read one per screen frame, offset by `frame_offset`: if the
+    // camera started later, compositing waits until the screen frame count catches up to
+    // it; if it started earlier, that many of its leading frames are read and discarded
+    // up front so the two streams are in lockstep for the rest of the render.
+    let has_webcam = webcam_setup.is_some();
+    let mut webcam_setup = webcam_setup;
+    let cam_frame_bytes = webcam_setup
+        .as_ref()
+        .map(|w| (w.geometry.width * w.geometry.height * 4) as usize)
+        .unwrap_or(0);
+    let mut cam_buf = vec![0u8; cam_frame_bytes];
+    let mut cam_ended = false;
+    let cam_start_at = webcam_setup
+        .as_ref()
+        .map(|w| w.frame_offset.max(0) as usize)
+        .unwrap_or(usize::MAX);
+    if let Some(w) = &mut webcam_setup {
+        let mut discard = vec![0u8; cam_frame_bytes];
+        for _ in 0..(-w.frame_offset).max(0) {
+            match w.stdout.read_exact(&mut discard) {
+                Ok(()) => {}
+                Err(_) => break,
+            }
+        }
+    }
 
     let frame_bytes = (w * h * 4) as usize;
     let mut src_buf = vec![0u8; frame_bytes];
@@ -281,7 +356,24 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
             .or_else(|| crops.last())
             .ok_or_else(|| anyhow!("camera produced no crops"))?;
 
-        renderer.render(&src_buf, crop, &mut out_buf)?;
+        let cam_frame = if let Some(w) = webcam_setup.as_mut() {
+            if rendered < cam_start_at || cam_ended {
+                None
+            } else {
+                match w.stdout.read_exact(&mut cam_buf) {
+                    Ok(()) => Some(cam_buf.as_slice()),
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        cam_ended = true;
+                        None
+                    }
+                    Err(e) => return Err(e).context("read decoded webcam frame"),
+                }
+            }
+        } else {
+            None
+        };
+
+        renderer.render(&src_buf, crop, cam_frame, &mut out_buf)?;
         enc_in
             .write_all(&out_buf)
             .context("write frame to encoder")?;
@@ -291,6 +383,9 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
     drop(enc_in);
     let elapsed_ns = clock::now_nanos() - start;
     decoder.wait().ok();
+    if let Some(w) = webcam_setup.as_mut() {
+        w.decoder.wait().ok();
+    }
     let status = encoder.wait().context("encoder wait")?;
     if !status.success() {
         return Err(anyhow!("ffmpeg encoder exited with {status}"));
@@ -309,9 +404,129 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         chrome: chrome_mode,
         crop_source,
         app_name: app_name.to_string(),
+        audio,
+        webcam: has_webcam,
     };
 
     Ok(report)
+}
+
+/// Everything the render loop needs to composite the webcam: where to place it, a
+/// decoder already producing frames scaled to exactly that size, and how many screen
+/// frames to skip or wait for before the two streams line up.
+struct WebcamSetup {
+    geometry: WebcamGeometry,
+    decoder: Child,
+    stdout: std::process::ChildStdout,
+    frame_offset: i64,
+}
+
+/// Resolves webcam placement and starts its decoder, or returns `Ok(None)` when the
+/// camera track cannot be used — a missing/zero-duration `camera.mp4`, or a corrupt
+/// `camera_frames.json`. Those are treated as "no webcam this render" rather than a hard
+/// failure, the same way a failed camera open at record time degrades to screen-only.
+fn resolve_webcam(
+    cfg: &crate::config::WebcamSettings,
+    camera_path: &Path,
+    camera_frames_path: &Path,
+    out_w: u32,
+    out_h: u32,
+    point_scale: f32,
+    screen_base_ns: u64,
+) -> Result<Option<WebcamSetup>> {
+    let Ok((cam_w, cam_h, cam_duration_s)) = probe_video(&camera_path.to_string_lossy()) else {
+        return Ok(None);
+    };
+    if cam_w == 0 || cam_h == 0 || cam_duration_s <= 0.0 {
+        return Ok(None);
+    }
+
+    let camera_frames: Vec<FrameRecord> =
+        match std::fs::read(camera_frames_path).map(|b| serde_json::from_slice(&b)) {
+            Ok(Ok(v)) => v,
+            _ => return Ok(None),
+        };
+    let Some(cam_first_ns) = camera_frames
+        .iter()
+        .find_map(|f| f.display_time_ns.or(f.pts_ns))
+    else {
+        return Ok(None);
+    };
+    let frame_offset = pip::frame_offset(screen_base_ns, cam_first_ns, FPS);
+
+    let is_circle = cfg.shape.eq_ignore_ascii_case("circle");
+    let aspect = if is_circle {
+        1.0
+    } else {
+        cam_w as f32 / cam_h as f32
+    };
+    let rect = pip::pip_rect(
+        out_w as f32,
+        out_h as f32,
+        Corner::parse(&cfg.position),
+        cfg.inset * point_scale,
+        (cfg.offset[0] * point_scale, cfg.offset[1] * point_scale),
+        cfg.size_percent,
+        aspect,
+    );
+    let geo_w = rect.w.round().max(1.0) as u32;
+    let geo_h = rect.h.round().max(1.0) as u32;
+    let radius = if is_circle {
+        (geo_w.min(geo_h) as f32) / 2.0
+    } else {
+        (cfg.corner_radius * point_scale)
+            .min(geo_w as f32 / 2.0)
+            .min(geo_h as f32 / 2.0)
+    };
+    let geometry = WebcamGeometry {
+        width: geo_w,
+        height: geo_h,
+        rect: [rect.x, rect.y, rect.w, rect.h],
+        radius,
+    };
+
+    // ffmpeg does the scaling and, for a circle, the centre crop to square, so the GPU
+    // only ever uploads a texture already at the overlay's own pixel size.
+    let mut filters = vec![format!("fps={FPS}")];
+    if cfg.mirror {
+        filters.push("hflip".to_string());
+    }
+    if is_circle {
+        filters.push("crop=ih:ih".to_string());
+    }
+    filters.push(format!("scale={geo_w}:{geo_h}"));
+
+    let ffmpeg = crate::tools::require("ffmpeg")?;
+    let mut decoder = Command::new(&ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-nostdin",
+            "-protocol_whitelist",
+            "file,pipe,fd",
+            "-i",
+        ])
+        .arg(camera_path)
+        .args([
+            "-vf",
+            &filters.join(","),
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-",
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("spawn ffmpeg webcam decoder")?;
+    let stdout = decoder.stdout.take().unwrap();
+
+    Ok(Some(WebcamSetup {
+        geometry,
+        decoder,
+        stdout,
+        frame_offset,
+    }))
 }
 
 /// Region of the captured frame that holds the content worth showing, in capture pixels.
@@ -334,6 +549,31 @@ impl ContentRect {
             h: self.h.min(max_h - y).max(1.0),
         }
     }
+}
+
+/// True when the capture carries an audio track, i.e. it was recorded with voice over.
+///
+/// Asked of the file rather than read from `meta.json`, so a capture made before the
+/// setting existed — or one whose microphone failed to start — is judged on what is
+/// actually in it.
+fn has_audio(path: &str) -> Result<bool> {
+    let out = Command::new(crate::tools::require("ffprobe")?)
+        .args([
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe,fd",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+        .context("run ffprobe")?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim() == "audio")
 }
 
 fn probe_video(path: &str) -> Result<(u32, u32, f64)> {

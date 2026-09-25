@@ -50,6 +50,22 @@ struct Cli {
     /// Do not open the finished video
     #[arg(long, global = true)]
     no_open: bool,
+
+    /// Record voice over for this run only (overrides config)
+    #[arg(long, global = true, conflicts_with = "no_mic")]
+    mic: bool,
+
+    /// Skip voice over for this run only (overrides config)
+    #[arg(long, global = true)]
+    no_mic: bool,
+
+    /// Show the webcam overlay for this run only (overrides config)
+    #[arg(long, global = true, conflicts_with = "no_webcam")]
+    webcam: bool,
+
+    /// Skip the webcam overlay for this run only (overrides config)
+    #[arg(long, global = true)]
+    no_webcam: bool,
 }
 
 #[derive(Subcommand)]
@@ -63,6 +79,8 @@ enum Command {
     },
     /// List windows that can be recorded
     Windows,
+    /// List cameras and microphones, and the names the config accepts
+    Devices,
     /// Check permissions and tooling
     Doctor {
         /// Also report what page bounds each open browser exposes
@@ -140,6 +158,7 @@ fn run() -> Result<()> {
         None | Some(Command::Record) => cmd_record(&cli, target),
         Some(Command::Render { ref path }) => cmd_render(&cli, path.clone()),
         Some(Command::Windows) => cmd_windows(),
+        Some(Command::Devices) => cmd_devices(),
         Some(Command::Doctor { verbose }) => app::ui::doctor(verbose),
         Some(Command::List) => cmd_list(),
         Some(Command::Prune {
@@ -193,6 +212,16 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
     if let Some(z) = cli.zoom {
         config.camera.zoom_percent = z;
     }
+    if cli.mic {
+        config.audio.microphone = true;
+    } else if cli.no_mic {
+        config.audio.microphone = false;
+    }
+    if cli.webcam {
+        config.webcam.enabled = true;
+    } else if cli.no_webcam {
+        config.webcam.enabled = false;
+    }
     let session = Session::create()?;
 
     app::ui::banner();
@@ -208,12 +237,19 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
                 plan.label.bright_black()
             );
             println!(
-                "  {} {}x{} at {}x\n",
+                "  {} {}x{} at {}x",
                 "         ".dimmed(),
                 plan.capture_w,
                 plan.capture_h,
                 plan.scale
             );
+            if let Some(mic) = &plan.microphone {
+                println!("  {} {}", "voice over".dimmed(), mic.bright_black());
+            }
+            if let Some(cam) = &plan.webcam {
+                println!("  {} {}", "webcam".dimmed(), cam.bright_black());
+            }
+            println!();
         },
         || app::ui::wait_for_stop(cli.seconds),
     )?;
@@ -278,6 +314,34 @@ fn cmd_windows() -> Result<()> {
     println!(
         "\n  {}\n",
         "recordo -w <ID>    or    recordo -a <app name>".bright_black()
+    );
+    Ok(())
+}
+
+fn cmd_devices() -> Result<()> {
+    use recordo::capture::devices;
+
+    println!("\n  {}", "microphones".bold());
+    let mics = devices::microphones();
+    if mics.is_empty() {
+        println!("  none found");
+    }
+    for d in &mics {
+        println!("  {} {}", "·".bright_black(), d.name);
+    }
+
+    println!("\n  {}", "cameras".bold());
+    let cams = devices::cameras();
+    if cams.is_empty() {
+        println!("  none found");
+    }
+    for d in &cams {
+        println!("  {} {}", "·".bright_black(), d.name);
+    }
+
+    println!(
+        "\n  {}\n",
+        "recordo config set audio.device \"<name>\"    or    webcam.device".bright_black()
     );
     Ok(())
 }

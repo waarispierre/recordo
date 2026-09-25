@@ -15,6 +15,8 @@ pub const DEFAULT_PATH: &str = "recordo.toml";
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
     pub camera: CameraSettings,
+    pub audio: AudioSettings,
+    pub webcam: WebcamSettings,
     pub style: StyleSettings,
 }
 
@@ -31,6 +33,56 @@ pub struct CameraSettings {
     /// Radius of the deadzone around the camera centre, as a percentage of the visible
     /// width. Cursor movement inside it is ignored. 0 follows continuously.
     pub follow_deadzone_percent: f64,
+}
+
+/// Voice over. Off by default: a recording should never pick up the room by surprise.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AudioSettings {
+    /// Record the microphone alongside the screen.
+    pub microphone: bool,
+    /// Which microphone, matched on name. Empty uses the system default.
+    pub device: String,
+}
+
+/// Webcam picture-in-picture. Off by default, same reasoning as voice over: never
+/// inferred, only turned on deliberately.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WebcamSettings {
+    pub enabled: bool,
+    /// Which camera, matched on name. Empty uses the system default.
+    pub device: String,
+    /// "bottom-left", "bottom-right", "top-left" or "top-right".
+    pub position: String,
+    /// Distance from that corner, in points.
+    pub inset: f32,
+    /// Nudge from the corner, in points, for when the inset alone is not enough.
+    pub offset: [f32; 2],
+    /// Height as a percentage of the exported frame's height.
+    pub size_percent: f32,
+    /// "circle" or "rect".
+    pub shape: String,
+    /// Corner rounding in points. Only used when shape is "rect".
+    pub corner_radius: f32,
+    /// Mirror the image, so it reads the way a mirror does rather than how others see you.
+    pub mirror: bool,
+}
+
+impl Default for WebcamSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            device: String::new(),
+            position: "bottom-left".into(),
+            inset: 32.0,
+            offset: [0.0, 0.0],
+            size_percent: 18.0,
+            shape: "circle".into(),
+            corner_radius: 24.0,
+            mirror: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -160,6 +212,22 @@ impl Config {
         }
     }
 
+    /// Webcam settings, clamped to sane ranges.
+    pub fn webcam(&self) -> WebcamSettings {
+        let w = &self.webcam;
+        WebcamSettings {
+            enabled: w.enabled,
+            device: w.device.clone(),
+            position: w.position.clone(),
+            inset: w.inset.max(0.0),
+            offset: w.offset,
+            size_percent: w.size_percent.clamp(1.0, 100.0),
+            shape: w.shape.clone(),
+            corner_radius: w.corner_radius.max(0.0),
+            mirror: w.mirror,
+        }
+    }
+
     /// Style for a specific recorded app. `chrome` may depend on which app it was.
     pub fn style(&self, bundle_id: Option<&str>) -> Style {
         let s = &self.style;
@@ -237,6 +305,44 @@ follow_hz = 1.1
 # while pointing or reading do not make it drift. Raise it for a calmer camera, set it
 # to 0 to follow continuously.
 follow_deadzone_percent = 10.0
+
+[audio]
+# Record your voice while you record the screen. Off by default, so a recording never
+# picks up the room by surprise. macOS asks for Microphone permission the first time.
+microphone = false
+
+# Which microphone, matched on name — "recordo devices" lists them. Empty uses whichever
+# input macOS is currently set to.
+device = ""
+
+[webcam]
+# Show your webcam over the recording, picture-in-picture. Off by default.
+enabled = false
+
+# Which camera, matched on name — "recordo devices" lists them. Empty uses the system
+# default.
+device = ""
+
+# Where it sits: "bottom-left", "bottom-right", "top-left" or "top-right".
+position = "bottom-left"
+
+# Distance from that corner, in points.
+inset = 32.0
+
+# Extra nudge from the corner, in points, for when the inset alone is not enough.
+offset = [0.0, 0.0]
+
+# Height as a percentage of the exported frame's height.
+size_percent = 18.0
+
+# "circle" or "rect".
+shape = "circle"
+
+# Corner rounding in points. Only used when shape is "rect".
+corner_radius = 24.0
+
+# Mirror the image, so it reads the way a mirror does.
+mirror = true
 
 [style]
 # All lengths below are in POINTS and scale with the capture, so the look is the same
@@ -417,10 +523,12 @@ fn add_missing_settings(text: &str) -> Result<Option<String>> {
         };
 
         if doc.get(section_name).is_none() {
-            doc.insert(
-                section_name,
-                toml_edit::Item::Table(toml_edit::Table::new()),
-            );
+            // Clone the default table's header decor too, so a whole new section arrives
+            // with its blank line and heading comment rather than jammed against the
+            // previous one.
+            let mut fresh = toml_edit::Table::new();
+            *fresh.decor_mut() = default_table.decor().clone();
+            doc.insert(section_name, toml_edit::Item::Table(fresh));
             changed = true;
         }
         let Some(target) = doc.get_mut(section_name).and_then(|i| i.as_table_mut()) else {
@@ -536,6 +644,10 @@ mod migration_tests {
         let only_camera = "[camera]\nzoom_percent = 45.0\n";
         let migrated = add_missing_settings(only_camera).unwrap().unwrap();
         assert!(migrated.contains("[style]"));
+        // A whole new section arrives with its own heading comment, not just its keys.
+        assert!(migrated.contains("[audio]"));
+        assert!(migrated.contains("Record your voice while you record the screen"));
+        assert!(migrated.contains("[webcam]"));
         assert!(toml::from_str::<Config>(&migrated).is_ok());
     }
 }

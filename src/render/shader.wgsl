@@ -30,12 +30,19 @@ struct Uniforms {
     bg_image_size: vec2<f32>,
     use_bg_image: f32,
     _pad2: f32,
+    // Webcam overlay: rect in output pixels (xy = origin, zw = size).
+    cam_rect: vec4<f32>,
+    // Output pixels; half the short side of cam_rect gives a circle.
+    cam_radius: f32,
+    cam_enabled: f32,
+    _pad3: vec2<f32>,
 };
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var src_sampler: sampler;
 @group(0) @binding(2) var<uniform> u: Uniforms;
 @group(0) @binding(3) var bg_tex: texture_2d<f32>;
+@group(0) @binding(4) var cam_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -135,6 +142,32 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // One-pixel antialiased edge so corners do not stair-step.
     let edge = 1.0 - smoothstep(-1.0, 1.0, win_d);
     color = mix(color, window_color, edge);
+
+    // Webcam picture-in-picture, drawn last so it sits above everything else. It reuses
+    // the same rounded-box SDF the window uses — a circle is simply a radius of half the
+    // short side, so no separate "is this a circle" branch is needed.
+    if (u.cam_enabled > 0.5) {
+        let cam_centre = u.cam_rect.xy + u.cam_rect.zw * 0.5;
+        let cam_half = u.cam_rect.zw * 0.5;
+        let cam_d = rounded_box_sdf(p - cam_centre, cam_half, u.cam_radius);
+
+        // A soft shadow behind the camera, the same shape offset and blurred, so it
+        // reads as floating above the content rather than pasted onto it.
+        let cam_shadow_d = rounded_box_sdf(p - cam_centre - vec2<f32>(0.0, 4.0), cam_half, u.cam_radius);
+        let cam_shadow = (1.0 - smoothstep(0.0, 16.0, cam_shadow_d)) * 0.35;
+        color = mix(color, vec4<f32>(0.0, 0.0, 0.0, 1.0), cam_shadow);
+
+        let cam_uv = (p - u.cam_rect.xy) / u.cam_rect.zw;
+        let cam_color = textureSampleLevel(cam_tex, src_sampler, cam_uv, 0.0);
+        let cam_edge = 1.0 - smoothstep(-1.0, 1.0, cam_d);
+        color = mix(color, cam_color, cam_edge);
+
+        // A thin border ring so the overlay reads as a deliberate frame rather than a
+        // sharp cutout, especially over a busy background.
+        let ring_d = abs(cam_d) - 1.5;
+        let ring = (1.0 - smoothstep(0.0, 1.5, ring_d)) * 0.5;
+        color = mix(color, vec4<f32>(1.0, 1.0, 1.0, 1.0), ring * step(cam_d, 4.0));
+    }
 
     return vec4<f32>(color.rgb, 1.0);
 }
