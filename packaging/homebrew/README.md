@@ -42,6 +42,30 @@ error at all.
 Stable releases cannot work privately in any case: a formula's `url` is fetched with
 curl, which holds no credentials, so the tarball 404s.
 
+## Why the formula shims `swift`
+
+`install` puts a `swift` wrapper on PATH rather than calling cargo directly. This is not
+tidiness — without it the build cannot succeed.
+
+SwiftPM evaluates `Package.swift` inside its own `sandbox-exec`, and Homebrew has already
+wrapped the whole build in one. `sandbox-exec` cannot nest, so the Swift bridge in
+`screencapturekit` dies with:
+
+```
+sandbox-exec: sandbox_apply: Operation not permitted
+error: 'swift-bridge': Invalid manifest
+```
+
+The flag that avoids it is `swift build --disable-sandbox`, but `screencapturekit`'s
+`build.rs` invokes `swift` with hardcoded arguments and consults no environment variable,
+so there is nowhere to pass it. Shimming the binary on PATH is the only route in.
+
+Homebrew provides no escape on its side either: `HOMEBREW_NO_SANDBOX` applies to casks
+and Linux, not to formula builds on macOS.
+
+This failure appears only under `brew install`. A normal `cargo build` is not sandboxed,
+so it never surfaces — which makes it easy to mistake for a broken formula.
+
 ## A prerequisite worth knowing
 
 Homebrew refuses to build when the Command Line Tools are older than the OS, with:

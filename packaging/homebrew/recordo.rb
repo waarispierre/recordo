@@ -32,6 +32,29 @@ class Recordo < Formula
   depends_on macos: :tahoe
 
   def install
+    # SwiftPM evaluates Package.swift inside its own sandbox-exec, and Homebrew has
+    # already wrapped this build in one. sandbox-exec cannot nest, so the Swift bridge in
+    # screencapturekit fails with "sandbox_apply: Operation not permitted" — a failure
+    # that only happens under brew, never in a normal cargo build.
+    #
+    # `swift build --disable-sandbox` avoids it, but that crate's build.rs calls `swift`
+    # with hardcoded arguments and reads no environment variable, so the only way to add
+    # the flag is to shim the binary on PATH. Homebrew offers no way to disable its own
+    # sandbox for a formula build: HOMEBREW_NO_SANDBOX covers casks and Linux only.
+    shim = buildpath/"brew-swift-shim"
+    shim.mkpath
+    (shim/"swift").write <<~BASH
+      #!/bin/bash
+      # Only `swift build` accepts --disable-sandbox; other subcommands reject it.
+      if [ "$1" = "build" ]; then
+          shift
+          exec /usr/bin/swift build --disable-sandbox "$@"
+      fi
+      exec /usr/bin/swift "$@"
+    BASH
+    chmod 0755, shim/"swift"
+    ENV.prepend_path "PATH", shim
+
     system "cargo", "install", *std_cargo_args
   end
 
