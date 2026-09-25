@@ -17,8 +17,10 @@ cargo test
   A macOS 15 SDK therefore fails to build, despite `apple-metal` declaring `.macOS(.v11)`
   in its `Package.swift` — an upstream inaccuracy.
 
-The build minimum is the binding one, so it is what CI and the Homebrew formula use. You need Xcode Command Line Tools, but not full Xcode — `build.rs` points
-the linker at the Swift runtime that ships with the Command Line Tools.
+The build minimum is the binding one, so it is what CI and `install.sh` check.
+
+You need Xcode Command Line Tools, but not full Xcode — `build.rs` points the linker at
+the Swift runtime that ships with the Command Line Tools.
 
 Running the tool needs Screen Recording permission on your terminal. `recordo doctor`
 reports what is missing.
@@ -101,8 +103,8 @@ The repository separates the application from the machinery around it:
 ```
 src/          the application
 ci/           the CI runner, the same one GitHub runs
+install.sh    what users run after cloning
 scripts/      standalone tools, also invoked by ci/
-packaging/    Homebrew formula and release steps
 docs/         code tour and proposals
 ```
 
