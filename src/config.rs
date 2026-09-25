@@ -28,6 +28,9 @@ pub struct CameraSettings {
     pub zoom_out_s: f64,
     /// Cursor-follow spring frequency in Hz; higher tracks more tightly.
     pub follow_hz: f64,
+    /// Radius of the deadzone around the camera centre, as a percentage of the visible
+    /// width. Cursor movement inside it is ignored. 0 follows continuously.
+    pub follow_deadzone_percent: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +69,7 @@ impl Default for CameraSettings {
             hold_s: d.hold_s,
             zoom_out_s: d.zoom_out_s,
             follow_hz: d.follow_hz,
+            follow_deadzone_percent: d.follow_deadzone_percent,
         }
     }
 }
@@ -139,6 +143,9 @@ impl Config {
             hold_s: c.hold_s.max(0.0),
             zoom_out_s: c.zoom_out_s.max(0.01),
             follow_hz: c.follow_hz.max(0.05),
+            // Above 50% the boundary would exceed the visible frame and the camera
+            // could never move at all.
+            follow_deadzone_percent: c.follow_deadzone_percent.clamp(0.0, 50.0),
         }
     }
 
@@ -213,6 +220,12 @@ hold_s = 1.3
 zoom_out_s = 0.7
 # Cursor-follow spring frequency (Hz). Higher tracks more tightly, lower feels calmer.
 follow_hz = 1.1
+
+# How far the cursor may wander before the camera follows it, as a percentage of the
+# visible width. The camera ignores everything inside this circle, so small movements
+# while pointing or reading do not make it drift. Raise it for a calmer camera, set it
+# to 0 to follow continuously.
+follow_deadzone_percent = 10.0
 
 [style]
 # All lengths below are in POINTS and scale with the capture, so the look is the same

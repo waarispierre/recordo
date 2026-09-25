@@ -140,6 +140,28 @@ invalid, so a bad value is reported immediately rather than at render time — i
 `background_image` path that does not exist. Piping the output
 (`recordo config | cat`) prints the settings instead of opening the menu.
 
+### Camera deadzone
+
+By default the camera ignores the cursor until it leaves a circle covering 10% of the
+visible width, then moves only far enough to bring it back to that boundary. Without it,
+every small movement while pointing or reading drags the camera along.
+
+```sh
+recordo config set camera.follow_deadzone_percent 20   # calmer
+recordo config set camera.follow_deadzone_percent 0    # follow continuously
+```
+
+Measured against a real 42-second recording:
+
+| deadzone | camera travel | largest single-frame move |
+|---|---|---|
+| `0` | 3380px | 41px |
+| `10` (default) | 2432px | 27px |
+| `20` | 641px | 8px |
+
+The radius is a share of the *visible* area rather than the source, so it covers the same
+portion of the exported frame at every zoom level.
+
 ### Colours
 
 Colours are stored as `[r, g, b]` floats but **accepted as hex**, which is the form design
@@ -168,6 +190,7 @@ The image is scaled to **cover** and centre-cropped, so any aspect ratio works.
 | `camera.zoom_percent` | how far to zoom in; `0` disables zooming, `45` means 1.45x |
 | `camera.zoom_in_s` / `hold_s` / `zoom_out_s` | how long the zoom ramps, dwells and releases |
 | `camera.follow_hz` | cursor-follow springiness; higher tracks more tightly |
+| `camera.follow_deadzone_percent` | how far the cursor may wander before the camera follows, as a percentage of the visible width. `0` follows continuously |
 | `style.padding` | how much background shows around the window |
 | `style.corner_radius` | window corner rounding |
 | `style.bg_top` / `bg_bottom` | background gradient, RGB 0-1 |
