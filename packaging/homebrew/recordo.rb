@@ -6,22 +6,19 @@
 # Copy into a tap repository — github.com/waarispierre/homebrew-tap — at
 # Formula/recordo.rb.
 #
-# This is deliberately head-only: it has no `url`/`sha256` stable release. A formula's
-# stable URL is fetched with curl, which holds no GitHub credentials, so a private
-# repository's tarball 404s. `head` clones over git instead, where SSH authenticates —
-# which makes this installable while the source stays private.
+# Head-only until the first tagged release. The repository is public, so no credentials
+# are involved:
 #
 #     brew install --HEAD waarispierre/tap/recordo
 #
-# Once the repository is public, scripts/release.sh adds the stable url and sha256, and
-# plain `brew install` starts working.
+# scripts/release.sh adds the stable `url` and `sha256` once a version is tagged, after
+# which plain `brew install` works and `brew upgrade` can see new versions.
 class Recordo < Formula
   desc "Screen recordings with a cursor-following camera"
   homepage "https://github.com/waarispierre/recordo"
   license any_of: ["MIT", "Apache-2.0"]
 
-  # SSH rather than HTTPS so a private repository authenticates with your existing keys.
-  head "git@github.com:waarispierre/recordo.git", branch: "main"
+  head "https://github.com/waarispierre/recordo.git", branch: "main"
 
   depends_on "rust" => :build
   # ffmpeg is executed as a subprocess, never linked, so its GPL licence does not reach
