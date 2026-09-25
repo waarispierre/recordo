@@ -1,3 +1,6 @@
+# typed: false
+# frozen_string_literal: true
+
 # Homebrew formula for recordo.
 #
 # Copy this into a tap repository — github.com/waarispierre/homebrew-tap — at
@@ -24,7 +27,7 @@ class Recordo < Formula
   depends_on macos: :sequoia
 
   def install
-    system "cargo", "install", *std_cargo_args(path: "cli")
+    system "cargo", "install", *std_cargo_args
   end
 
   def caveats
