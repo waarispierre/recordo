@@ -92,7 +92,10 @@ mod tests {
             Corner::TopRight,
         ] {
             let r = pip_rect(OUT_W, OUT_H, corner, 32.0, (0.0, 0.0), 18.0, 1.0);
-            assert!(r.x >= 0.0 && r.y >= 0.0, "{corner:?} rect at negative origin");
+            assert!(
+                r.x >= 0.0 && r.y >= 0.0,
+                "{corner:?} rect at negative origin"
+            );
             assert!(
                 r.x + r.w <= OUT_W && r.y + r.h <= OUT_H,
                 "{corner:?} rect spills past the frame: {r:?}"
@@ -102,7 +105,15 @@ mod tests {
 
     #[test]
     fn a_huge_inset_is_clamped_rather_than_pushed_off_frame() {
-        let r = pip_rect(OUT_W, OUT_H, Corner::BottomLeft, 5000.0, (0.0, 0.0), 18.0, 1.0);
+        let r = pip_rect(
+            OUT_W,
+            OUT_H,
+            Corner::BottomLeft,
+            5000.0,
+            (0.0, 0.0),
+            18.0,
+            1.0,
+        );
         assert!(r.x >= 0.0 && r.x + r.w <= OUT_W);
         assert!(r.y >= 0.0 && r.y + r.h <= OUT_H);
     }
@@ -124,8 +135,24 @@ mod tests {
 
     #[test]
     fn rect_width_follows_aspect_not_just_height() {
-        let square = pip_rect(OUT_W, OUT_H, Corner::BottomLeft, 32.0, (0.0, 0.0), 18.0, 1.0);
-        let wide = pip_rect(OUT_W, OUT_H, Corner::BottomLeft, 32.0, (0.0, 0.0), 18.0, 16.0 / 9.0);
+        let square = pip_rect(
+            OUT_W,
+            OUT_H,
+            Corner::BottomLeft,
+            32.0,
+            (0.0, 0.0),
+            18.0,
+            1.0,
+        );
+        let wide = pip_rect(
+            OUT_W,
+            OUT_H,
+            Corner::BottomLeft,
+            32.0,
+            (0.0, 0.0),
+            18.0,
+            16.0 / 9.0,
+        );
         assert_eq!(square.h, wide.h);
         assert!(wide.w > square.w);
     }

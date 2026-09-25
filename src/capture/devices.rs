@@ -10,10 +10,10 @@
 
 use objc2_av_foundation::{
     AVAuthorizationStatus, AVCaptureDevice, AVCaptureDeviceDiscoverySession,
-    AVCaptureDevicePosition, AVCaptureDeviceTypeMicrophone,
-    AVCaptureDeviceTypeBuiltInWideAngleCamera, AVCaptureDeviceTypeContinuityCamera,
-    AVCaptureDeviceTypeDeskViewCamera, AVCaptureDeviceTypeExternal, AVMediaType,
-    AVMediaTypeAudio, AVMediaTypeVideo,
+    AVCaptureDevicePosition, AVCaptureDeviceTypeBuiltInWideAngleCamera,
+    AVCaptureDeviceTypeContinuityCamera, AVCaptureDeviceTypeDeskViewCamera,
+    AVCaptureDeviceTypeExternal, AVCaptureDeviceTypeMicrophone, AVMediaType, AVMediaTypeAudio,
+    AVMediaTypeVideo,
 };
 use objc2_foundation::NSArray;
 
@@ -72,7 +72,6 @@ pub fn camera_access() -> Access {
     status(unsafe { AVMediaTypeVideo })
 }
 
-
 /// One camera or microphone as `AVCaptureDevice` reports it.
 pub struct Device {
     /// A stable identifier — not shown to a person, but what config matching resolves
@@ -84,7 +83,10 @@ pub struct Device {
     pub name: String,
 }
 
-fn discover(types: &NSArray<objc2_av_foundation::AVCaptureDeviceType>, media: Option<&AVMediaType>) -> Vec<Device> {
+fn discover(
+    types: &NSArray<objc2_av_foundation::AVCaptureDeviceType>,
+    media: Option<&AVMediaType>,
+) -> Vec<Device> {
     // Safe: a discovery session only enumerates already-connected hardware; it does not
     // open, activate, or request permission for anything.
     let session = unsafe {

@@ -474,7 +474,9 @@ fn resolve_webcam(
     let radius = if is_circle {
         (geo_w.min(geo_h) as f32) / 2.0
     } else {
-        (cfg.corner_radius * point_scale).min(geo_w as f32 / 2.0).min(geo_h as f32 / 2.0)
+        (cfg.corner_radius * point_scale)
+            .min(geo_w as f32 / 2.0)
+            .min(geo_h as f32 / 2.0)
     };
     let geometry = WebcamGeometry {
         width: geo_w,
