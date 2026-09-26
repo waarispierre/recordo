@@ -1,10 +1,11 @@
 //! Compositing and encoding.
 //!
 //! This module is the offscreen wgpu compositor: it renders one frame at a time by
-//! uploading the decoded source frame, drawing a full-screen triangle that samples it
-//! through the crop window, then reading the result back. Readback via CPU is the simple
-//! path and is fast enough to beat real time; a later phase can keep frames on the GPU
-//! and hand them straight to the encoder.
+//! uploading the decoded source frame, drawing a full-screen triangle that composites the
+//! window — chrome, content, corners and shadow, scaled and panned as one unit for the
+//! click-zoom effect — over a static background, then reading the result back. Readback
+//! via CPU is the simple path and is fast enough to beat real time; a later phase can keep
+//! frames on the GPU and hand them straight to the encoder.
 //!
 //! [`export`] drives it end to end — decode, composite, encode.
 
@@ -17,7 +18,14 @@ use wgpu::util::DeviceExt;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
-    crop: [f32; 4],
+    // Fixed content rect within the source texture, normalized. The click-zoom effect
+    // never changes this — it resizes and pans the window instead.
+    content_uv: [f32; 4],
+    // How far the window's centre is shifted from the canvas centre, in output pixels.
+    win_offset: [f32; 2],
+    // The window's fraction of its full, canvas-filling size; 1.0 at full zoom.
+    win_scale: f32,
+    _pad0: f32,
     out_size: [f32; 2],
     padding: f32,
     corner_radius: f32,
@@ -174,6 +182,7 @@ pub struct Renderer {
     use_bg_image: f32,
     cam_tex: wgpu::Texture,
     cam: Option<WebcamGeometry>,
+    content_uv: [f32; 4],
 }
 
 /// Output dimensions that hold the content at 1:1 plus chrome and padding.
@@ -182,6 +191,56 @@ pub fn output_size(src_w: u32, src_h: u32, style: &Style) -> (u32, u32) {
     let pad = style.padding.round() as u32 * 2;
     let chrome = style.chrome.height(src_h).round() as u32;
     (((src_w + pad) + 1) & !1, ((src_h + chrome + pad) + 1) & !1)
+}
+
+/// Whole-window scale and pan for one output frame: how much of its full, canvas-filling
+/// size the window (chrome, content, corners and shadow, as one unit) should be drawn at,
+/// and how far its centre should shift from the canvas centre.
+#[derive(Debug, Clone, Copy)]
+pub struct WindowZoom {
+    pub scale: f32,
+    pub offset: [f32; 2],
+}
+
+/// Derives a [`WindowZoom`] from a content-space zoom crop (see [`crate::camera::solve`]).
+///
+/// `scale` is `crop`'s magnification relative to `max_zoom`, so the window is at its
+/// smallest, resting size when the crop is the full frame and grows to fill the canvas
+/// exactly as the crop reaches its tightest. The pan offset comes from how far the crop's
+/// centre has drifted from the content's centre — zero at rest, since an unzoomed crop is
+/// always the full frame — applied against whatever room is actually left on each axis
+/// once the window's own size is subtracted from the canvas. That room shrinks to a
+/// constant (the padding margin) as scale reaches 1.0, so the window can never grow past
+/// the canvas and its shadow and rounded corners are never clipped.
+pub fn window_zoom(
+    crop: Crop,
+    content_w: f64,
+    content_h: f64,
+    max_zoom: f64,
+    out_w: u32,
+    out_h: u32,
+    padding: f32,
+) -> WindowZoom {
+    let zoom = content_w / crop.w.max(1e-6);
+    let scale = ((zoom / max_zoom.max(1e-6)) as f32).clamp(0.0, 1.0);
+
+    // Signed fraction of content size the crop's centre has drifted from the content's
+    // own centre; bounded to roughly +/-0.5 by the crop always fitting inside the content.
+    let fx = ((crop.x + crop.w / 2.0) - content_w / 2.0) / content_w;
+    let fy = ((crop.y + crop.h / 2.0) - content_h / 2.0) / content_h;
+
+    let out_half = (out_w as f32 / 2.0, out_h as f32 / 2.0);
+    let native_half = (out_half.0 - padding, out_half.1 - padding);
+    let win_half = (native_half.0 * scale, native_half.1 * scale);
+    let avail = (out_half.0 - win_half.0, out_half.1 - win_half.1);
+
+    WindowZoom {
+        scale,
+        offset: [
+            (fx as f32 * 2.0).clamp(-1.0, 1.0) * avail.0,
+            (fy as f32 * 2.0).clamp(-1.0, 1.0) * avail.1,
+        ],
+    }
 }
 
 impl Renderer {
@@ -193,6 +252,7 @@ impl Renderer {
         style: Style,
         background: Option<BackgroundImage>,
         cam: Option<WebcamGeometry>,
+        content_uv: [f32; 4],
     ) -> Result<Self> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -304,7 +364,10 @@ impl Renderer {
         let uniform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uniforms"),
             contents: bytemuck::bytes_of(&Uniforms {
-                crop: [0.0, 0.0, 1.0, 1.0],
+                content_uv,
+                win_offset: [0.0, 0.0],
+                win_scale: 1.0,
+                _pad0: 0.0,
                 out_size: [out_w as f32, out_h as f32],
                 padding: style.padding,
                 corner_radius: style.corner_radius,
@@ -494,6 +557,7 @@ impl Renderer {
             use_bg_image,
             cam_tex,
             cam,
+            content_uv,
         })
     }
 
@@ -509,7 +573,7 @@ impl Renderer {
     pub fn render(
         &self,
         src_rgba: &[u8],
-        crop: Crop,
+        win: WindowZoom,
         cam_rgba: Option<&[u8]>,
         out: &mut Vec<u8>,
     ) -> Result<()> {
@@ -567,12 +631,10 @@ impl Renderer {
         };
 
         let u = Uniforms {
-            crop: [
-                (crop.x / self.src_w as f64) as f32,
-                (crop.y / self.src_h as f64) as f32,
-                (crop.w / self.src_w as f64) as f32,
-                (crop.h / self.src_h as f64) as f32,
-            ],
+            content_uv: self.content_uv,
+            win_offset: win.offset,
+            win_scale: win.scale,
+            _pad0: 0.0,
             out_size: [self.out_w as f32, self.out_h as f32],
             padding: self.style.padding,
             corner_radius: self.style.corner_radius,

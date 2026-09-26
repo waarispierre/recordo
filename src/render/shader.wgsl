@@ -1,17 +1,25 @@
-// Composites one recorded frame: crop-window zoom, synthetic window chrome, rounded
-// corners, drop shadow, gradient background.
+// Composites one recorded frame: whole-window click-zoom, synthetic window chrome,
+// rounded corners, drop shadow, gradient background.
 //
-// Zoom is done by sampling a sub-rectangle of the source texture (crop-window sampling)
-// rather than scaling an already-decoded frame, so magnified output stays as sharp as
-// the source allows.
+// The click-zoom effect scales and pans the whole window — chrome, content, corner
+// radius and shadow together — as a single unit, while the canvas (background and
+// padding margin) stays fixed. The source is always sampled 1:1 through the same fixed
+// content rect; magnification comes from resizing the window on the canvas, not from
+// resampling the source.
 //
 // The chrome is drawn rather than captured. That lets a recording of a bare web page be
 // presented as a browser window with no tabs, no bookmarks, no profile avatar and no URL
 // history — i.e. no identifying detail from the real browser.
 
 struct Uniforms {
-    // Crop rect in normalized source coords: xy = origin, zw = size.
-    crop: vec4<f32>,
+    // Fixed content rect within the source texture, normalized: xy = origin, zw = size.
+    // The click-zoom effect never changes this — it resizes and pans the window instead.
+    content_uv: vec4<f32>,
+    // How far the window's centre is shifted from the canvas centre, in output pixels.
+    win_offset: vec2<f32>,
+    // The window's fraction of its full, canvas-filling size: 1.0 at full zoom.
+    win_scale: f32,
+    _pad0: f32,
     out_size: vec2<f32>,
     padding: f32,
     corner_radius: f32,
@@ -21,7 +29,7 @@ struct Uniforms {
     bg_top: vec4<f32>,
     bg_bottom: vec4<f32>,
     chrome_bg: vec4<f32>,
-    // Title bar height in output pixels; 0 disables the chrome entirely.
+    // Title bar height in output pixels at win_scale = 1.0; 0 disables the chrome entirely.
     chrome_height: f32,
     // 0 = plain title bar, 1 = also draw a Safari-style URL pill.
     chrome_style: f32,
@@ -74,8 +82,6 @@ fn circle(p: vec2<f32>, centre: vec2<f32>, r: f32) -> f32 {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let p = in.uv * u.out_size;
     let centre = u.out_size * 0.5;
-    let half_size = centre - vec2<f32>(u.padding);
-    let radius = min(u.corner_radius, min(half_size.x, half_size.y));
 
     var color = mix(u.bg_top, u.bg_bottom, in.uv.y);
     if (u.use_bg_image > 0.5) {
@@ -87,35 +93,46 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = textureSampleLevel(bg_tex, src_sampler, bg_uv, 0.0);
     }
 
-    // Shadow: the same rounded box, offset and softened.
-    let shadow_d = rounded_box_sdf(p - centre - u.shadow_offset, half_size, radius);
-    let shadow = (1.0 - smoothstep(0.0, u.shadow_blur, shadow_d)) * u.shadow_alpha;
+    // The whole window — chrome, content, corner radius and shadow — scales and pans
+    // together as one unit for the click-zoom effect. `win_scale` never exceeds 1.0, so
+    // the window (at its native size below) never grows past the canvas.
+    let native_half = centre - vec2<f32>(u.padding);
+    let win_half = native_half * u.win_scale;
+    let win_centre = centre + u.win_offset;
+    let radius = min(u.corner_radius * u.win_scale, min(win_half.x, win_half.y));
+
+    // Shadow: the same rounded box, offset and softened, scaled with the window so it
+    // reads as attached to it rather than painted on the canvas.
+    let shadow_d = rounded_box_sdf(p - win_centre - u.shadow_offset * u.win_scale, win_half, radius);
+    let shadow = (1.0 - smoothstep(0.0, u.shadow_blur * u.win_scale, shadow_d)) * u.shadow_alpha;
     color = mix(color, vec4<f32>(0.0, 0.0, 0.0, 1.0), shadow);
 
     // The window is the full rounded box; the chrome occupies its top strip and the
     // captured content fills the remainder.
-    let win_min = centre - half_size;
-    let win_size = half_size * 2.0;
-    let win_d = rounded_box_sdf(p - centre, half_size, radius);
+    let win_min = win_centre - win_half;
+    let win_size = win_half * 2.0;
+    let win_d = rounded_box_sdf(p - win_centre, win_half, radius);
+    let chrome_height = u.chrome_height * u.win_scale;
 
     var window_color = u.chrome_bg;
-    let content_top = win_min.y + u.chrome_height;
+    let content_top = win_min.y + chrome_height;
 
     if (p.y >= content_top) {
-        // Map into the content area, then through the crop window.
+        // Map into the content area, then onto the fixed content rect. The click-zoom
+        // effect never resamples the source — it only resizes and moves the window.
         let local = vec2<f32>(
             (p.x - win_min.x) / win_size.x,
-            (p.y - content_top) / max(win_size.y - u.chrome_height, 1.0),
+            (p.y - content_top) / max(win_size.y - chrome_height, 1.0),
         );
-        let src_uv = u.crop.xy + clamp(local, vec2<f32>(0.0), vec2<f32>(1.0)) * u.crop.zw;
+        let src_uv = u.content_uv.xy + clamp(local, vec2<f32>(0.0), vec2<f32>(1.0)) * u.content_uv.zw;
         window_color = textureSampleLevel(src_tex, src_sampler, src_uv, 0.0);
     } else if (u.chrome_height > 0.0) {
         // Traffic lights, evenly spaced from the left.
-        let cy = win_min.y + u.chrome_height * 0.5;
+        let cy = win_min.y + chrome_height * 0.5;
         // Sized from the bar height rather than a fixed pixel cap: chrome_height is in
         // output pixels, so a constant would halve the dots on a Retina capture. macOS
         // draws roughly 12pt dots spaced 20pt apart in a ~28pt bar.
-        let r = u.chrome_height * 0.19;
+        let r = chrome_height * 0.19;
         let gap = r * 3.1;
         let x0 = win_min.x + gap + r;
         window_color = mix(window_color, vec4<f32>(1.0, 0.37, 0.34, 1.0),
@@ -127,10 +144,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 
         // Safari-style URL pill, centred in the title bar.
         if (u.chrome_style > 0.5) {
-            let pill_h = u.chrome_height * 0.52;
-            let pill_w = min(win_size.x * 0.34, 420.0);
+            let pill_h = chrome_height * 0.52;
+            let pill_w = min(win_size.x * 0.34, 420.0 * u.win_scale);
             let pill_d = rounded_box_sdf(
-                p - vec2<f32>(centre.x, cy),
+                p - vec2<f32>(win_centre.x, cy),
                 vec2<f32>(pill_w * 0.5, pill_h * 0.5),
                 pill_h * 0.5,
             );
