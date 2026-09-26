@@ -244,6 +244,7 @@ pub fn window_zoom(
 }
 
 impl Renderer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         src_w: u32,
         src_h: u32,

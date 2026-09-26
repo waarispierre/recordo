@@ -80,10 +80,14 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         .unwrap_or_else(|| std::path::Path::new("."));
     let sidecar = |name: &str| dir.join(name);
 
-    let mut tel: Telemetry = serde_json::from_slice(&std::fs::read(sidecar("telemetry.json"))?)
-        .with_context(|| format!("read {}", sidecar("telemetry.json").display()))?;
-    let frames: Vec<FrameRecord> = serde_json::from_slice(&std::fs::read(sidecar("frames.json"))?)
-        .with_context(|| format!("read {}", sidecar("frames.json").display()))?;
+    let mut tel: Telemetry = serde_json::from_slice(
+        &std::fs::read(sidecar("telemetry.json"))
+            .with_context(|| format!("read {}", sidecar("telemetry.json").display()))?,
+    )?;
+    let frames: Vec<FrameRecord> = serde_json::from_slice(
+        &std::fs::read(sidecar("frames.json"))
+            .with_context(|| format!("read {}", sidecar("frames.json").display()))?,
+    )?;
 
     let (w, h, duration_s) = probe_video(src)?;
 
@@ -211,7 +215,17 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
     ];
     let zooms: Vec<WindowZoom> = crops
         .iter()
-        .map(|c| render::window_zoom(*c, content.w, content.h, cfg.max_zoom, out_w, out_h, style.padding))
+        .map(|c| {
+            render::window_zoom(
+                *c,
+                content.w,
+                content.h,
+                cfg.max_zoom,
+                out_w,
+                out_h,
+                style.padding,
+            )
+        })
         .collect();
 
     let webcam_cfg = config.webcam();
