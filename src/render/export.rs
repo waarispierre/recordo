@@ -10,7 +10,7 @@ use crate::capture::telemetry::Telemetry;
 use crate::config::Config;
 use crate::pip::{self, Corner};
 use crate::render::Chrome;
-use crate::render::{self as render, BackgroundImage, Renderer, WebcamGeometry};
+use crate::render::{self as render, BackgroundImage, Renderer, WebcamGeometry, WindowZoom};
 use anyhow::{Context, Result, anyhow};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -80,10 +80,14 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         .unwrap_or_else(|| std::path::Path::new("."));
     let sidecar = |name: &str| dir.join(name);
 
-    let mut tel: Telemetry = serde_json::from_slice(&std::fs::read(sidecar("telemetry.json"))?)
-        .with_context(|| format!("read {}", sidecar("telemetry.json").display()))?;
-    let frames: Vec<FrameRecord> = serde_json::from_slice(&std::fs::read(sidecar("frames.json"))?)
-        .with_context(|| format!("read {}", sidecar("frames.json").display()))?;
+    let mut tel: Telemetry = serde_json::from_slice(
+        &std::fs::read(sidecar("telemetry.json"))
+            .with_context(|| format!("read {}", sidecar("telemetry.json").display()))?,
+    )?;
+    let frames: Vec<FrameRecord> = serde_json::from_slice(
+        &std::fs::read(sidecar("frames.json"))
+            .with_context(|| format!("read {}", sidecar("frames.json").display()))?,
+    )?;
 
     let (w, h, duration_s) = probe_video(src)?;
 
@@ -187,14 +191,7 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         e.y -= content.y;
     }
     let cfg = config.camera();
-    let crops: Vec<Crop> = camera::solve(&tel, &times, content.w, content.h, &cfg)
-        .into_iter()
-        .map(|c| Crop {
-            x: c.x + content.x,
-            y: c.y + content.y,
-            ..c
-        })
-        .collect();
+    let crops: Vec<Crop> = camera::solve(&tel, &times, content.w, content.h, &cfg);
 
     let background = match config.background_path()? {
         Some(path) => Some(BackgroundImage::load(&path)?),
@@ -206,6 +203,30 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
 
     let (content_w_px, content_h_px) = (content.w.round() as u32, content.h.round() as u32);
     let (out_w, out_h) = render::output_size(content_w_px, content_h_px, &style);
+
+    // Fixed content rect within the full captured frame, normalized. The click-zoom
+    // effect never resamples the source — it only scales and pans the rendered window —
+    // so this is the same window content every frame regardless of zoom.
+    let content_uv = [
+        (content.x / w as f64) as f32,
+        (content.y / h as f64) as f32,
+        (content.w / w as f64) as f32,
+        (content.h / h as f64) as f32,
+    ];
+    let zooms: Vec<WindowZoom> = crops
+        .iter()
+        .map(|c| {
+            render::window_zoom(
+                *c,
+                content.w,
+                content.h,
+                cfg.max_zoom,
+                out_w,
+                out_h,
+                style.padding,
+            )
+        })
+        .collect();
 
     let webcam_cfg = config.webcam();
     let camera_path = sidecar("camera.mp4");
@@ -231,6 +252,7 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
         style,
         background,
         webcam_setup.as_ref().map(|s| s.geometry),
+        content_uv,
     )?;
 
     let ffmpeg = crate::tools::require("ffmpeg")?;
@@ -354,10 +376,10 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
             Err(e) => return Err(e).context("read decoded frame"),
         }
 
-        // Hold the last solved crop if ffmpeg emits more frames than we solved for.
-        let crop = *crops
+        // Hold the last solved zoom if ffmpeg emits more frames than we solved for.
+        let win = *zooms
             .get(rendered)
-            .or_else(|| crops.last())
+            .or_else(|| zooms.last())
             .ok_or_else(|| anyhow!("camera produced no crops"))?;
 
         let cam_frame = if let Some(w) = webcam_setup.as_mut() {
@@ -377,7 +399,7 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
             None
         };
 
-        renderer.render(&src_buf, crop, cam_frame, &mut out_buf)?;
+        renderer.render(&src_buf, win, cam_frame, &mut out_buf)?;
         match enc_in.write_all(&out_buf) {
             Ok(()) => {}
             // `-shortest` (used when a voice-over track is present) can end the encoder
