@@ -23,8 +23,8 @@ use objc2::{AnyThread, DefinedClass, define_class};
 use objc2_av_foundation::{
     AVCaptureConnection, AVCaptureDevice, AVCaptureDeviceInput, AVCaptureFileOutput,
     AVCaptureFileOutputRecordingDelegate, AVCaptureMovieFileOutput, AVCaptureOutput,
-    AVCaptureSession, AVCaptureSessionPresetHigh, AVCaptureVideoDataOutput,
-    AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
+    AVCaptureSession, AVCaptureSessionPresetHigh, AVCaptureSessionPresetLow,
+    AVCaptureVideoDataOutput, AVCaptureVideoDataOutputSampleBufferDelegate, AVMediaTypeVideo,
 };
 use objc2_core_media::CMSampleBuffer;
 use objc2_core_video::{CVPixelBufferLockFlags, kCVPixelFormatType_32BGRA};
@@ -55,9 +55,11 @@ pub struct PreviewFrame {
 /// "what does the camera see right now", not a backlog to catch up on.
 pub type PreviewSink = Arc<Mutex<Option<PreviewFrame>>>;
 
-/// Longest edge of a [`PreviewFrame`], in pixels. Small on purpose: this is downsampled
-/// again to a handful of terminal cells, so there is nothing to gain from copying more.
-const PREVIEW_SIZE: u32 = 48;
+/// Longest edge of a [`PreviewFrame`], in pixels. Sized for a terminal drawing six
+/// samples per cell, so a preview a few dozen cells across still has a pixel per sample
+/// with room to spare — and copying this much costs nothing next to the encode already
+/// running on the same frames.
+const PREVIEW_SIZE: u32 = 160;
 
 /// Only every Nth sample buffer is turned into a [`PreviewFrame`] — at a 30fps session
 /// this is close to 5fps, which is plenty for a framing check and keeps the extra tap
@@ -446,5 +448,79 @@ impl Webcam {
         unsafe { self.session.stopRunning() };
         let _ = &self.recording_delegate;
         self.frame_log.lock().map(|g| g.clone()).unwrap_or_default()
+    }
+}
+
+/// The camera opened for a live thumbnail and nothing else — no movie output, so nothing
+/// is written to disk.
+///
+/// A recording opens its own session on the same device, and a camera only tolerates one,
+/// so a caller holding this must [`stop`](Self::stop) it before starting a recording.
+/// Start and stop on the same thread the rest of your AVFoundation work runs on: tearing
+/// a session down from a thread that did not start it hangs in `stopRunning`.
+pub struct Preview {
+    session: Retained<AVCaptureSession>,
+    // Held for the session's lifetime: the output keeps its delegate unretained.
+    _delegate: Retained<PreviewDelegate>,
+}
+
+impl Preview {
+    /// Opens `device` (by name; empty for the system default) and publishes frames into
+    /// `sink` until stopped.
+    pub fn start(device: &str, sink: PreviewSink) -> Result<(Self, String)> {
+        let cam = find_device(device)?;
+        // Safe: localizedName is a plain string accessor.
+        let name = unsafe { cam.localizedName() }.to_string();
+
+        // Safe: opens the device for capture; released when `input`/`session` drop.
+        let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&cam) }
+            .map_err(|e| anyhow!("could not open camera: {e}"))?;
+
+        // Safe: AVCaptureSession has no preconditions on construction.
+        let session = unsafe { AVCaptureSession::new() };
+        // Nothing here is kept, so ask for the cheapest thing the camera will give rather
+        // than a full-resolution stream that only gets thrown away after downsampling.
+        // Safe: presets are static framework constants, set before the session runs.
+        unsafe { session.setSessionPreset(AVCaptureSessionPresetLow) };
+
+        // Safe: pure session-graph mutation, before the session starts running.
+        if !unsafe { session.canAddInput(&input) } {
+            anyhow::bail!("camera input rejected by capture session");
+        }
+        unsafe { session.addInput(&input) };
+
+        let output = unsafe { AVCaptureVideoDataOutput::new() };
+        // Safe: as in `Webcam::start` — BGRA has to be asked for, it is not the default.
+        unsafe { output.setVideoSettings(Some(&bgra_settings())) };
+        let delegate = PreviewDelegate::new(sink);
+        let queue = DispatchQueue::new("recordo.webcam.preview", DispatchQueueAttr::SERIAL);
+        // Safe: the delegate and queue both outlive the session, held in `Preview`.
+        unsafe {
+            output.setSampleBufferDelegate_queue(
+                Some(ProtocolObject::from_ref(&*delegate)),
+                Some(&queue),
+            )
+        };
+        if !unsafe { session.canAddOutput(&output) } {
+            anyhow::bail!("preview output rejected by capture session");
+        }
+        unsafe { session.addOutput(&output) };
+
+        // Safe: starts hardware capture; this is the documented way to begin.
+        unsafe { session.startRunning() };
+        Ok((
+            Self {
+                session,
+                _delegate: delegate,
+            },
+            name,
+        ))
+    }
+
+    /// Releases the camera. Explicit rather than a `Drop` impl so the caller decides when
+    /// it happens — a recording cannot open the device until this has returned.
+    pub fn stop(self) {
+        // Safe: stopRunning is the documented way to tear down the session.
+        unsafe { self.session.stopRunning() };
     }
 }

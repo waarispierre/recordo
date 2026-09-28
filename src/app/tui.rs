@@ -22,7 +22,7 @@ use crossterm::terminal::{
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use recordo::capture::recorder::{self, Target};
-use recordo::capture::webcam::{PreviewFrame, PreviewSink};
+use recordo::capture::webcam::{self, PreviewFrame, PreviewSink};
 use recordo::config::{self, Config, Setting};
 use recordo::render::export;
 use recordo::session::{self, Session};
@@ -170,6 +170,9 @@ struct App {
     /// Set by the Record tab's Enter key and picked up by the event loop, which — unlike
     /// the key handler — can hand the terminal to [`run_record`].
     pending_record: Option<Target>,
+    /// The pre-flight camera, held open while the Record tab shows a framing check. It
+    /// owns the device, so [`run_record`] has to close it before a recording can open one.
+    preview: Option<(webcam::Preview, PreviewSink, config::WebcamSettings)>,
     /// A finished job's report, shown as a popup until the next keypress dismisses it.
     report: Option<String>,
     status: String,
@@ -194,6 +197,7 @@ impl App {
             job: None,
             recording: None,
             pending_record: None,
+            preview: None,
             report: None,
             status: "j/k move · enter select · tab switch · q quit".into(),
             config_path,
@@ -212,6 +216,44 @@ impl App {
     fn reload_settings(&mut self) -> Result<()> {
         self.settings = config::settings(&self.config_path)?;
         Ok(())
+    }
+
+    /// Opens or closes the pre-flight camera behind the Record tab's framing check.
+    fn toggle_preview(&mut self) {
+        if self.close_preview() {
+            self.status = "preview off".into();
+            return;
+        }
+        let config = match Config::load_or_create(&self.config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.status = format!("could not load config: {e:#}");
+                return;
+            }
+        };
+        let sink: PreviewSink = Arc::new(Mutex::new(None));
+        match webcam::Preview::start(&config.webcam.device, Arc::clone(&sink)) {
+            Ok((preview, name)) => {
+                self.status = format!("preview · {name}");
+                self.preview = Some((preview, sink, config.webcam()));
+            }
+            // A camera that is missing, in use or denied is a "no preview", not an error
+            // worth derailing the app over — the same call degrades a recording to
+            // screen-only rather than failing it.
+            Err(e) => self.status = format!("no preview: {e:#}"),
+        }
+    }
+
+    /// Releases the camera if the pre-flight preview holds it. Returns whether it did,
+    /// and must be called before a recording tries to open the same device.
+    fn close_preview(&mut self) -> bool {
+        match self.preview.take() {
+            Some((preview, _, _)) => {
+                preview.stop();
+                true
+            }
+            None => false,
+        }
     }
 
     /// Re-reads the recordings and keeps the cursor on something that still exists — the
@@ -469,6 +511,10 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
         }
     };
 
+    // The recording opens its own session on the camera, and the device only tolerates
+    // one, so the framing check has to let go first. It is restored below if it was up.
+    let had_preview = app.close_preview();
+
     let preview: Option<(PreviewSink, config::WebcamSettings)> = config
         .webcam
         .enabled
@@ -552,6 +598,9 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
     );
 
     app.recording = None;
+    if had_preview && !quit {
+        app.toggle_preview();
+    }
     if let Some(e) = draw_error {
         return Err(e.into());
     }
@@ -720,6 +769,7 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.start_render(dir);
             }
         }
+        (KeyCode::Char('w'), _) if app.tab == Tab::Record => app.toggle_preview(),
         (KeyCode::Char('d'), _) if app.tab == Tab::Recordings => {
             if let Some(s) = app
                 .recording_state
@@ -1077,6 +1127,26 @@ fn draw_record(frame: &mut Frame, area: Rect, app: &mut App) {
         .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .highlight_symbol("❯ ");
     frame.render_stateful_widget(list, area, &mut app.window_state);
+
+    if let Some((_, sink, cfg)) = &app.preview {
+        let thumb = sink.lock().ok().and_then(|g| g.clone());
+        match thumb {
+            Some(thumb) => draw_webcam_pip(frame, area, cfg, &thumb),
+            // The camera takes a moment to deliver its first frame; saying so beats a
+            // corner that just sits empty.
+            None => {
+                let waiting = Paragraph::new("waking the camera…")
+                    .style(Style::default().fg(Color::DarkGray));
+                let spot = Rect {
+                    x: area.x + 2,
+                    y: area.bottom().saturating_sub(2),
+                    width: area.width.saturating_sub(4).min(20),
+                    height: 1,
+                };
+                frame.render_widget(waiting, spot);
+            }
+        }
+    }
 }
 
 /// Rows the wordmark occupies: three of block type, a blank, and the tagline.
@@ -1396,8 +1466,8 @@ fn draw_webcam_pip(
     let aspect = aspect * 2.0;
     // The configured percentage is authored against an exported frame of a thousand-odd
     // pixels; in a couple of dozen terminal rows the same number is too small to frame a
-    // face by, so it only steers within a range that stays legible.
-    let size_percent = cfg.size_percent.clamp(20.0, 40.0);
+    // face by, so it only steers within a range big enough to actually judge framing.
+    let size_percent = cfg.size_percent.clamp(32.0, 52.0);
     let r = recordo::pip::pip_rect(
         area.width as f32,
         area.height as f32,
@@ -1425,7 +1495,7 @@ fn draw_webcam_pip(
 
     frame.render_widget(Clear, box_area);
     let round_corners = !circle && cfg.corner_radius > 0.0;
-    let lines = render_half_blocks(
+    let lines = render_sextants(
         thumb,
         box_area.width,
         box_area.height,
@@ -1436,12 +1506,17 @@ fn draw_webcam_pip(
     frame.render_widget(Paragraph::new(lines), box_area);
 }
 
-/// Renders `thumb` as `cols`x`rows` terminal cells using the half-block trick (`▀`, fg =
-/// top source pixel, bg = bottom), doubling the effective vertical resolution without
-/// needing an image-in-terminal crate. `circle` masks cells outside the box's inscribed
-/// ellipse; `round_corners` is a coarse approximation of `corner_radius` — clipping the
-/// four outer cells — since character cells can't do sub-cell rounding.
-fn render_half_blocks(
+/// Renders `thumb` into `cols`x`rows` terminal cells using 2x3 sextant glyphs.
+///
+/// Six samples per cell rather than the two a half block carries, which is what stops a
+/// face reading as pixel art. A cell can still only hold two colours, so each one's
+/// samples are split at the midpoint of their own luminance range: the brighter group
+/// becomes the foreground and picks the glyph, the darker becomes the background.
+///
+/// `circle` masks against the box's inscribed circle and `round_corners` approximates
+/// `corner_radius`, both evaluated per sample — a partly covered cell keeps the samples
+/// that are inside and leaves the rest transparent, which is what smooths the edge.
+fn render_sextants(
     thumb: &PreviewFrame,
     cols: u16,
     rows: u16,
@@ -1451,8 +1526,7 @@ fn render_half_blocks(
 ) -> Vec<Line<'static>> {
     let cols = cols.max(1);
     let rows = rows.max(1);
-    // Half-pixel rows: the unit the mask and the sampling both work in.
-    let subrows = rows * 2;
+    let (sub_w, sub_h) = (cols * 2, rows * 3);
 
     // A circle is masked out of a centred square, the same crop the renderer applies, so
     // the two agree on what is actually in frame.
@@ -1463,57 +1537,121 @@ fn render_half_blocks(
         (0, 0, thumb.w, thumb.h)
     };
 
-    let sample = |col: u16, subrow: u16| -> Color {
-        let nx = (col as f32 + 0.5) / cols as f32;
+    let sample = |sx: u16, sy: u16| -> (u8, u8, u8) {
+        let nx = (sx as f32 + 0.5) / sub_w as f32;
         let nx = if mirror { 1.0 - nx } else { nx };
-        let ny = (subrow as f32 + 0.5) / subrows as f32;
-        let sx = win_x + ((nx * win_w as f32) as u32).min(win_w.saturating_sub(1));
-        let sy = win_y + ((ny * win_h as f32) as u32).min(win_h.saturating_sub(1));
-        let i = ((sy * thumb.w + sx) * 3) as usize;
-        Color::Rgb(thumb.rgb[i], thumb.rgb[i + 1], thumb.rgb[i + 2])
+        let ny = (sy as f32 + 0.5) / sub_h as f32;
+        let px = win_x + ((nx * win_w as f32) as u32).min(win_w.saturating_sub(1));
+        let py = win_y + ((ny * win_h as f32) as u32).min(win_h.saturating_sub(1));
+        let i = ((py * thumb.w + px) * 3) as usize;
+        (thumb.rgb[i], thumb.rgb[i + 1], thumb.rgb[i + 2])
     };
 
-    // Masking per half-pixel rather than per cell is what keeps the edge of a circle
-    // smooth: a cell whose top half is outside and bottom half inside still gets drawn,
-    // as a lower half block.
-    let shown = |col: u16, subrow: u16| -> bool {
-        if round_corners && (col == 0 || col == cols - 1) && (subrow < 2 || subrow >= subrows - 2) {
+    let shown = |sx: u16, sy: u16| -> bool {
+        let x = (sx as f32 + 0.5) / sub_w as f32 - 0.5;
+        let y = (sy as f32 + 0.5) / sub_h as f32 - 0.5;
+        if round_corners && x.abs() > 0.45 && y.abs() > 0.4 {
             return false;
         }
-        if !circle {
-            return true;
-        }
-        let x = (col as f32 + 0.5) / cols as f32 - 0.5;
-        let y = (subrow as f32 + 0.5) / subrows as f32 - 0.5;
-        x * x + y * y <= 0.25
+        !circle || x * x + y * y <= 0.25
     };
 
     let mut lines = Vec::with_capacity(rows as usize);
     for row in 0..rows {
         let mut spans = Vec::with_capacity(cols as usize);
         for col in 0..cols {
-            let (top, bottom) = (row * 2, row * 2 + 1);
-            let span = match (shown(col, top), shown(col, bottom)) {
-                (true, true) => Span::styled(
-                    "▀",
-                    Style::default()
-                        .fg(sample(col, top))
-                        .bg(sample(col, bottom)),
-                ),
-                (true, false) => Span::styled("▀", Style::default().fg(sample(col, top))),
-                (false, true) => Span::styled("▄", Style::default().fg(sample(col, bottom))),
-                (false, false) => Span::raw(" "),
-            };
-            spans.push(span);
+            // Bit order matches the sextant code points: top-left, top-right, middle-left,
+            // middle-right, bottom-left, bottom-right.
+            let mut visible: Vec<(u8, (u8, u8, u8))> = Vec::with_capacity(6);
+            for (bit, (dx, dy)) in [(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)]
+                .into_iter()
+                .enumerate()
+            {
+                let (sx, sy) = (col * 2 + dx, row * 3 + dy);
+                if shown(sx, sy) {
+                    visible.push((bit as u8, sample(sx, sy)));
+                }
+            }
+            spans.push(sextant_span(&visible));
         }
         lines.push(Line::from(spans));
     }
     lines
 }
 
+/// One cell from its visible samples, as `(bit, rgb)` pairs.
+fn sextant_span(visible: &[(u8, (u8, u8, u8))]) -> Span<'static> {
+    if visible.is_empty() {
+        return Span::raw(" ");
+    }
+    let luma = |(r, g, b): (u8, u8, u8)| 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+    let mean = |group: &[(u8, u8, u8)]| -> Color {
+        let n = group.len().max(1) as u32;
+        let sum = group.iter().fold((0u32, 0u32, 0u32), |acc, (r, g, b)| {
+            (acc.0 + *r as u32, acc.1 + *g as u32, acc.2 + *b as u32)
+        });
+        Color::Rgb((sum.0 / n) as u8, (sum.1 / n) as u8, (sum.2 / n) as u8)
+    };
+
+    // Samples outside the mask must stay transparent, so a partly covered cell can only
+    // paint its visible samples in the foreground — there is no second colour to spend.
+    if visible.len() < 6 {
+        let mask = visible.iter().fold(0u8, |m, (bit, _)| m | 1 << bit);
+        let colours: Vec<(u8, u8, u8)> = visible.iter().map(|(_, c)| *c).collect();
+        return Span::styled(
+            sextant(mask).to_string(),
+            Style::default().fg(mean(&colours)),
+        );
+    }
+
+    let (min, max) = visible
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(lo, hi), (_, c)| {
+            (lo.min(luma(*c)), hi.max(luma(*c)))
+        });
+    // A flat cell has no split worth making; drawing it solid avoids turning sensor noise
+    // into a dither pattern.
+    if max - min < 8.0 {
+        let colours: Vec<(u8, u8, u8)> = visible.iter().map(|(_, c)| *c).collect();
+        return Span::styled("█".to_string(), Style::default().fg(mean(&colours)));
+    }
+
+    let mid = (min + max) / 2.0;
+    let (mut fg, mut bg) = (Vec::new(), Vec::new());
+    let mut mask = 0u8;
+    for (bit, colour) in visible {
+        if luma(*colour) >= mid {
+            mask |= 1 << bit;
+            fg.push(*colour);
+        } else {
+            bg.push(*colour);
+        }
+    }
+    Span::styled(
+        sextant(mask).to_string(),
+        Style::default().fg(mean(&fg)).bg(mean(&bg)),
+    )
+}
+
+/// The glyph for a 2x3 bitmask. `U+1FB00..=U+1FB3B` covers 60 of the 64 combinations —
+/// the empty, full and two half-column cases already exist as block elements, and the
+/// code points skip them.
+fn sextant(mask: u8) -> char {
+    match mask {
+        0 => ' ',
+        0b010101 => '▌',
+        0b101010 => '▐',
+        0b111111 => '█',
+        m => {
+            let index = m as u32 - 1 - u32::from(m > 0b010101) - u32::from(m > 0b101010);
+            char::from_u32(0x1FB00 + index).unwrap_or('█')
+        }
+    }
+}
+
 fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let keys = match app.tab {
-        Tab::Record => "enter record · tab switch · q quit",
+        Tab::Record => "enter record · w preview · tab switch · q quit",
         Tab::Settings => "enter edit · tab switch · q quit",
         Tab::Recordings => "enter open · r render · c compress · n name · p drop raw · d delete",
     };
@@ -1718,23 +1856,45 @@ mod tests {
 
     #[test]
     fn a_rectangular_overlay_fills_every_cell() {
-        let rendered = render_half_blocks(&grey(32, 24), 10, 4, false, false, false);
-        assert_eq!(shape(&rendered), vec!["▀".repeat(10); 4]);
+        // A flat frame has no luminance split to make, so every cell renders solid.
+        let rendered = render_sextants(&grey(32, 24), 10, 4, false, false, false);
+        assert_eq!(shape(&rendered), vec!["█".repeat(10); 4]);
+    }
+
+    #[test]
+    fn every_sextant_mask_maps_to_a_distinct_glyph() {
+        let glyphs: std::collections::HashSet<char> = (0..64).map(|m| sextant(m as u8)).collect();
+        assert_eq!(glyphs.len(), 64, "two masks share a glyph");
+        assert_eq!(sextant(0), ' ');
+        assert_eq!(sextant(0b111111), '█');
+        // The first and last of the dedicated sextant code points.
+        assert_eq!(sextant(0b000001), '\u{1FB00}');
+        assert_eq!(sextant(0b111110), '\u{1FB3B}');
     }
 
     #[test]
     fn a_circular_overlay_is_masked_symmetrically() {
         let rows = 5;
         let cols = rows * 2;
-        let rendered = render_half_blocks(&grey(32, 32), cols, rows, true, false, false);
+        let rendered = render_sextants(&grey(32, 32), cols, rows, true, false, false);
         let drawn = shape(&rendered);
+
+        // Flipping a row means reversing the cells *and* mirroring each glyph, since a
+        // sextant carries its own left/right halves.
+        let mask_of: std::collections::HashMap<char, u8> =
+            (0..64).map(|m| (sextant(m as u8), m as u8)).collect();
+        let mirror_glyph = |c: char| {
+            let m = mask_of[&c];
+            let swap =
+                |m: u8, lo: u8, hi: u8| (m & 1 << lo) << (hi - lo) | (m & 1 << hi) >> (hi - lo);
+            sextant(swap(m, 0, 1) | swap(m, 2, 3) | swap(m, 4, 5))
+        };
 
         for (i, line) in drawn.iter().enumerate() {
             let chars: Vec<char> = line.chars().collect();
             assert_eq!(chars.len(), cols as usize);
-            // Left and right halves mirror each other, and top and bottom rows mirror
-            // vertically — a lopsided circle is the bug this guards against.
-            let flipped: String = chars.iter().rev().collect();
+            // A lopsided circle is the bug this guards against.
+            let flipped: String = chars.iter().rev().map(|c| mirror_glyph(*c)).collect();
             assert_eq!(*line, flipped, "row {i} is not left-right symmetric");
         }
 
@@ -1743,13 +1903,13 @@ mod tests {
             drawn[0].starts_with(' '),
             "top-left corner should be masked"
         );
-        assert_eq!(drawn[(rows / 2) as usize], "▀".repeat(cols as usize));
+        assert_eq!(drawn[(rows / 2) as usize], "█".repeat(cols as usize));
     }
 
     #[test]
     fn mirroring_does_not_change_which_cells_are_drawn() {
-        let plain = render_half_blocks(&grey(32, 32), 12, 6, true, false, false);
-        let mirrored = render_half_blocks(&grey(32, 32), 12, 6, true, false, true);
+        let plain = render_sextants(&grey(32, 32), 12, 6, true, false, false);
+        let mirrored = render_sextants(&grey(32, 32), 12, 6, true, false, true);
         assert_eq!(shape(&plain), shape(&mirrored));
     }
 }
