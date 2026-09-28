@@ -54,7 +54,21 @@ pub enum Action {
     Quit,
     Record(Target),
     Render(std::path::PathBuf),
+    Compress(std::path::PathBuf, f64),
     Open(std::path::PathBuf),
+}
+
+/// What an in-progress [`Edit`] popup will do with its buffer once confirmed.
+enum EditKind {
+    /// Editing a config setting selected in the Settings tab.
+    Setting,
+    /// Editing a target size in MB for the recording at this path.
+    CompressSize(std::path::PathBuf),
+}
+
+struct Edit {
+    kind: EditKind,
+    buffer: String,
 }
 
 struct Windows {
@@ -83,7 +97,7 @@ struct App {
     setting_state: ListState,
     recordings: Vec<Session>,
     recording_state: ListState,
-    editing: Option<String>,
+    editing: Option<Edit>,
     status: String,
     config_path: std::path::PathBuf,
 }
@@ -215,6 +229,23 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Action>> {
                 return Ok(Some(Action::Render(s.dir.clone())));
             }
         }
+        (KeyCode::Char('c'), _) if app.tab == Tab::Recordings => {
+            if let Some(s) = app
+                .recording_state
+                .selected()
+                .and_then(|i| app.recordings.get(i))
+            {
+                if s.has_export() {
+                    app.editing = Some(Edit {
+                        kind: EditKind::CompressSize(s.dir.clone()),
+                        buffer: String::new(),
+                    });
+                    app.status = "target size in MB — enter to compress, esc to cancel".into();
+                } else {
+                    app.status = "render first — nothing to compress yet".into();
+                }
+            }
+        }
         (KeyCode::Enter, _) => match app.tab {
             Tab::Record => {
                 let index = app.window_state.selected().unwrap_or(0);
@@ -230,7 +261,10 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Action>> {
                     .selected()
                     .and_then(|i| app.settings.get(i))
                 {
-                    app.editing = Some(String::new());
+                    app.editing = Some(Edit {
+                        kind: EditKind::Setting,
+                        buffer: String::new(),
+                    });
                     app.status = format!("editing {} — enter to save, esc to cancel", s.key);
                 }
             }
@@ -255,74 +289,94 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<Option<Action>> {
 }
 
 fn handle_edit_key(app: &mut App, key: KeyEvent) -> Result<Option<Action>> {
-    let Some(buffer) = app.editing.as_mut() else {
-        return Ok(None);
-    };
     match key.code {
         KeyCode::Esc => {
             app.editing = None;
             app.status = "cancelled".into();
         }
         KeyCode::Backspace => {
-            buffer.pop();
+            if let Some(edit) = app.editing.as_mut() {
+                edit.buffer.pop();
+            }
         }
-        KeyCode::Char(c) => buffer.push(c),
+        KeyCode::Char(c) => {
+            if let Some(edit) = app.editing.as_mut() {
+                edit.buffer.push(c);
+            }
+        }
         KeyCode::Enter => {
-            let value = buffer.trim().to_string();
-            app.editing = None;
+            let Some(edit) = app.editing.take() else {
+                return Ok(None);
+            };
+            let value = edit.buffer.trim().to_string();
             if value.is_empty() {
                 app.status = "unchanged".into();
                 return Ok(None);
             }
-            let Some(setting) = app
-                .setting_state
-                .selected()
-                .and_then(|i| app.settings.get(i))
-            else {
-                return Ok(None);
-            };
-            let key_name = setting.key.clone();
-            let previous = setting.value.clone();
-            let value = if config::is_colour_key(&key_name) {
-                match config::rgb_to_toml(&value) {
-                    Some(v) => v,
-                    None => {
-                        app.status = format!("{value} is not a colour — try #5C66C7");
-                        return Ok(None);
+            match edit.kind {
+                EditKind::Setting => return handle_setting_edit(app, value),
+                EditKind::CompressSize(dir) => match value.parse::<f64>() {
+                    Ok(mb) if mb.is_finite() && mb > 0.0 => {
+                        return Ok(Some(Action::Compress(dir, mb)));
                     }
-                }
-            } else {
-                value
-            };
-
-            // Write, verify, roll back. Same contract as the non-interactive path: an
-            // invalid value must never be left in the file.
-            let before = std::fs::read_to_string(&app.config_path)?;
-            match config::set_value(&app.config_path, &key_name, &value)
-                .and_then(|_| Config::load_or_create(&app.config_path))
-                .and_then(|c| c.background_path().map(|_| ()))
-            {
-                Ok(()) => {
-                    app.status = format!("{key_name} = {value}");
-                    app.reload_settings()?;
-                }
-                Err(e) => {
-                    std::fs::write(&app.config_path, before)?;
-                    let cause = e
-                        .chain()
-                        .last()
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| e.to_string());
-                    let cause = cause
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .unwrap_or("invalid");
-                    app.status = format!("rejected: {} — keeping {previous}", cause.trim());
-                }
+                    _ => {
+                        app.status = format!("{value:?} is not a size in MB — try 25");
+                    }
+                },
             }
         }
         _ => {}
+    }
+    Ok(None)
+}
+
+fn handle_setting_edit(app: &mut App, value: String) -> Result<Option<Action>> {
+    let Some(setting) = app
+        .setting_state
+        .selected()
+        .and_then(|i| app.settings.get(i))
+    else {
+        return Ok(None);
+    };
+    let key_name = setting.key.clone();
+    let previous = setting.value.clone();
+    let value = if config::is_colour_key(&key_name) {
+        match config::rgb_to_toml(&value) {
+            Some(v) => v,
+            None => {
+                app.status = format!("{value} is not a colour — try #5C66C7");
+                return Ok(None);
+            }
+        }
+    } else {
+        value
+    };
+
+    // Write, verify, roll back. Same contract as the non-interactive path: an invalid
+    // value must never be left in the file.
+    let before = std::fs::read_to_string(&app.config_path)?;
+    match config::set_value(&app.config_path, &key_name, &value)
+        .and_then(|_| Config::load_or_create(&app.config_path))
+        .and_then(|c| c.background_path().map(|_| ()))
+    {
+        Ok(()) => {
+            app.status = format!("{key_name} = {value}");
+            app.reload_settings()?;
+        }
+        Err(e) => {
+            std::fs::write(&app.config_path, before)?;
+            let cause = e
+                .chain()
+                .last()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| e.to_string());
+            let cause = cause
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("invalid");
+            app.status = format!("rejected: {} — keeping {previous}", cause.trim());
+        }
     }
     Ok(None)
 }
@@ -484,7 +538,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let keys = match app.tab {
         Tab::Record => "enter record · tab switch · q quit",
         Tab::Settings => "enter edit · tab switch · q quit",
-        Tab::Recordings => "enter open · r re-render · tab switch · q quit",
+        Tab::Recordings => "enter open · r re-render · c compress · tab switch · q quit",
     };
     let line = Line::from(vec![
         Span::styled(
@@ -500,32 +554,49 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_edit_popup(frame: &mut Frame, app: &App) {
-    let Some(buffer) = app.editing.as_ref() else {
+    let Some(edit) = app.editing.as_ref() else {
         return;
     };
-    let Some(setting) = app
-        .setting_state
-        .selected()
-        .and_then(|i| app.settings.get(i))
-    else {
-        return;
+
+    let (title, hint) = match &edit.kind {
+        EditKind::Setting => {
+            let Some(setting) = app
+                .setting_state
+                .selected()
+                .and_then(|i| app.settings.get(i))
+            else {
+                return;
+            };
+            let hint = if config::is_colour_key(&setting.key) {
+                "hex like #5C66C7, or r, g, b".to_string()
+            } else {
+                format!("now {}", setting.value)
+            };
+            (setting.key.clone(), hint)
+        }
+        EditKind::CompressSize(dir) => {
+            let name = dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            (
+                format!("compress {name}"),
+                "target size in MB, e.g. 25".to_string(),
+            )
+        }
     };
 
     let area = centered(60, 30, frame.area());
     frame.render_widget(Clear, area);
 
-    let hint = if config::is_colour_key(&setting.key) {
-        "hex like #5C66C7, or r, g, b".to_string()
-    } else {
-        format!("now {}", setting.value)
-    };
     let body = vec![
         Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))),
         Line::from(""),
         Line::from(vec![
             Span::styled("› ", Style::default().fg(Color::Cyan)),
             Span::styled(
-                buffer.clone(),
+                edit.buffer.clone(),
                 Style::default().add_modifier(Modifier::BOLD),
             ),
             Span::styled("█", Style::default().fg(Color::Cyan)),
@@ -535,7 +606,7 @@ fn draw_edit_popup(frame: &mut Frame, app: &App) {
         Paragraph::new(body).wrap(Wrap { trim: true }).block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" {} ", setting.key))
+                .title(format!(" {title} "))
                 .border_style(Style::default().fg(Color::Cyan)),
         ),
         area,

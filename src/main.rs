@@ -194,6 +194,10 @@ fn run_tui(cli: &Cli) -> Result<()> {
                 let outcome = cmd_render(cli, Some(dir.to_string_lossy().into_owned()));
                 report_and_pause(outcome)?;
             }
+            app::tui::Action::Compress(dir, max_mb) => {
+                let outcome = cmd_compress(Some(dir.to_string_lossy().into_owned()), max_mb);
+                report_and_pause(outcome)?;
+            }
             app::tui::Action::Open(path) => {
                 std::process::Command::new("/usr/bin/open")
                     .arg(&path)
