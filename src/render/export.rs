@@ -456,6 +456,165 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
     Ok(report)
 }
 
+/// Result of [`compress_to_size`].
+#[derive(Debug, Clone)]
+pub struct CompressReport {
+    pub input_bytes: u64,
+    pub output_bytes: u64,
+    pub max_bytes: u64,
+    /// False when the input already fit under `max_bytes` and was copied byte-for-byte
+    /// rather than re-encoded.
+    pub reencoded: bool,
+    /// Video bitrate used for the final encode attempt, if re-encoded.
+    pub video_bitrate_bps: Option<u64>,
+}
+
+impl CompressReport {
+    pub fn fits(&self) -> bool {
+        self.output_bytes <= self.max_bytes
+    }
+}
+
+/// Subtracted from the naive bitrate budget up front: container overhead and
+/// `h264_videotoolbox`'s own overshoot both eat into it, and undershooting slightly is
+/// cheaper than needing a second encode pass.
+const SIZE_SAFETY: f64 = 0.92;
+
+/// Hardware VBR can still miss high on hard-to-compress content; if the first pass
+/// overshoots, one more pass scaled by the actual ratio gets close enough without an
+/// unbounded retry loop.
+const MAX_ENCODE_ATTEMPTS: u32 = 2;
+
+/// Floor so a very tight target does not solve for a bitrate too low to be watchable.
+const MIN_VIDEO_BITRATE_BPS: u64 = 300_000;
+
+/// Re-encodes `src` so it fits under `max_bytes`, writing the result to `dst`.
+///
+/// Solves for the highest video bitrate that should fit the budget rather than applying
+/// a fixed compression level, so quality only drops as much as the target actually
+/// forces. Audio is stream-copied, never re-encoded, since it is a small fraction of the
+/// budget and copying costs nothing. If `src` already fits, it is copied byte-for-byte
+/// instead of being re-encoded at all.
+pub fn compress_to_size(src: &str, dst: &str, max_bytes: u64) -> Result<CompressReport> {
+    crate::tools::check_not_option_like("input", src)?;
+    crate::tools::check_not_option_like("output", dst)?;
+
+    let input_bytes = std::fs::metadata(src)
+        .with_context(|| format!("read {src}"))?
+        .len();
+    if input_bytes <= max_bytes {
+        std::fs::copy(src, dst).with_context(|| format!("copy {src} to {dst}"))?;
+        crate::session::restrict(Path::new(dst))?;
+        return Ok(CompressReport {
+            input_bytes,
+            output_bytes: input_bytes,
+            max_bytes,
+            reencoded: false,
+            video_bitrate_bps: None,
+        });
+    }
+
+    let (_, _, duration_s) = probe_video(src)?;
+    if duration_s <= 0.0 {
+        return Err(anyhow!("{src} reports zero duration"));
+    }
+    let audio = has_audio(src)?;
+    let audio_bps = if audio {
+        audio_bitrate_bps(src)?.unwrap_or(128_000)
+    } else {
+        0
+    };
+
+    let mut video_bps = video_bitrate_for_budget(max_bytes, duration_s, audio_bps);
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        encode_at_bitrate(src, dst, audio, video_bps)?;
+        let output_bytes = std::fs::metadata(dst)
+            .with_context(|| format!("read {dst}"))?
+            .len();
+        if output_bytes <= max_bytes
+            || attempt >= MAX_ENCODE_ATTEMPTS
+            || video_bps <= MIN_VIDEO_BITRATE_BPS
+        {
+            crate::session::restrict(Path::new(dst))?;
+            return Ok(CompressReport {
+                input_bytes,
+                output_bytes,
+                max_bytes,
+                reencoded: true,
+                video_bitrate_bps: Some(video_bps),
+            });
+        }
+        // Overshot: scale down by how far off the last attempt actually landed, with a
+        // little extra margin so this converges rather than oscillating.
+        let ratio = max_bytes as f64 / output_bytes as f64;
+        video_bps = ((video_bps as f64 * ratio * 0.95) as u64).max(MIN_VIDEO_BITRATE_BPS);
+    }
+}
+
+fn video_bitrate_for_budget(max_bytes: u64, duration_s: f64, audio_bps: u64) -> u64 {
+    let target_total_bps = (max_bytes as f64 * 8.0 / duration_s) * SIZE_SAFETY;
+    (target_total_bps - audio_bps as f64).max(MIN_VIDEO_BITRATE_BPS as f64) as u64
+}
+
+fn encode_at_bitrate(src: &str, dst: &str, audio: bool, video_bps: u64) -> Result<()> {
+    let ffmpeg = crate::tools::require("ffmpeg")?;
+    let b_v = video_bps.to_string();
+    let mut args: Vec<&str> = vec![
+        "-v",
+        "error",
+        "-nostdin",
+        "-protocol_whitelist",
+        "file,pipe,fd",
+        "-y",
+        "-i",
+        src,
+        "-c:v",
+        "h264_videotoolbox",
+        "-b:v",
+        &b_v,
+        "-pix_fmt",
+        "yuv420p",
+    ];
+    if audio {
+        args.extend(["-c:a", "copy"]);
+    } else {
+        args.push("-an");
+    }
+    args.push(dst);
+
+    let status = Command::new(&ffmpeg)
+        .args(&args)
+        .status()
+        .context("run ffmpeg compress")?;
+    if !status.success() {
+        return Err(anyhow!("ffmpeg exited with {status}"));
+    }
+    Ok(())
+}
+
+/// Actual bitrate of the first audio stream, when the container records one.
+fn audio_bitrate_bps(path: &str) -> Result<Option<u64>> {
+    let out = Command::new(crate::tools::require("ffprobe")?)
+        .args([
+            "-v",
+            "error",
+            "-protocol_whitelist",
+            "file,pipe,fd",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=bit_rate",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            path,
+        ])
+        .output()
+        .context("run ffprobe")?;
+    Ok(String::from_utf8_lossy(&out.stdout).trim().parse().ok())
+}
+
 /// Everything the render loop needs to composite the webcam: where to place it, a
 /// decoder already producing frames scaled to exactly that size, and how many screen
 /// frames to skip or wait for before the two streams line up.

@@ -77,6 +77,14 @@ enum Command {
         /// Recording folder; defaults to the most recent
         path: Option<String>,
     },
+    /// Re-encode a rendered export to fit under a size limit, e.g. for PR/CI uploads
+    Compress {
+        /// Recording folder; defaults to the most recent
+        path: Option<String>,
+        /// Target size in megabytes (1,000,000 bytes), e.g. 25 for Azure DevOps, 10 for GitHub
+        #[arg(long)]
+        max_mb: f64,
+    },
     /// List windows that can be recorded
     Windows,
     /// List cameras and microphones, and the names the config accepts
@@ -157,6 +165,7 @@ fn run() -> Result<()> {
         }
         None | Some(Command::Record) => cmd_record(&cli, target),
         Some(Command::Render { ref path }) => cmd_render(&cli, path.clone()),
+        Some(Command::Compress { ref path, max_mb }) => cmd_compress(path.clone(), max_mb),
         Some(Command::Windows) => cmd_windows(),
         Some(Command::Devices) => cmd_devices(),
         Some(Command::Doctor { verbose }) => app::ui::doctor(verbose),
@@ -183,6 +192,10 @@ fn run_tui(cli: &Cli) -> Result<()> {
             }
             app::tui::Action::Render(dir) => {
                 let outcome = cmd_render(cli, Some(dir.to_string_lossy().into_owned()));
+                report_and_pause(outcome)?;
+            }
+            app::tui::Action::Compress(dir, max_mb) => {
+                let outcome = cmd_compress(Some(dir.to_string_lossy().into_owned()), max_mb);
                 report_and_pause(outcome)?;
             }
             app::tui::Action::Open(path) => {
@@ -293,6 +306,88 @@ fn cmd_render(cli: &Cli, path: Option<String>) -> Result<()> {
             .status();
     }
     Ok(())
+}
+
+fn cmd_compress(path: Option<String>, max_mb: f64) -> Result<()> {
+    if !max_mb.is_finite() || max_mb <= 0.0 {
+        anyhow::bail!("--max-mb must be greater than 0");
+    }
+    // Deliberately does not go through `Session::open`/`latest`, which require a
+    // `capture.mp4` — `recordo prune` drops that raw capture on purpose while keeping the
+    // rendered export, and compressing an already-rendered video for sharing is exactly
+    // the situation that leaves you in.
+    let dir = resolve_compress_dir(path)?;
+    let src = dir.join("export.mp4");
+    let dst = dir.join("export-compressed.mp4");
+
+    let max_bytes = (max_mb * 1_000_000.0) as u64;
+    println!(
+        "  {} {}",
+        "compressing".green().bold(),
+        dir.display().bright_black()
+    );
+
+    let report = recordo::render::export::compress_to_size(
+        &src.to_string_lossy(),
+        &dst.to_string_lossy(),
+        max_bytes,
+    )?;
+
+    let mb = |b: u64| b as f64 / 1_000_000.0;
+    if report.reencoded {
+        println!(
+            "  {} {:.1} MB → {:.1} MB{}",
+            "·".bright_black(),
+            mb(report.input_bytes),
+            mb(report.output_bytes),
+            report
+                .video_bitrate_bps
+                .map(|b| format!(" · {:.1} Mbps video", b as f64 / 1_000_000.0))
+                .unwrap_or_default()
+        );
+    } else {
+        println!(
+            "  {} already under {:.0} MB — copied as-is",
+            "·".bright_black(),
+            max_mb
+        );
+    }
+    if !report.fits() {
+        println!(
+            "  {} still {:.1} MB, over the {:.0} MB target — try a lower --max-mb",
+            "!".yellow(),
+            mb(report.output_bytes),
+            max_mb
+        );
+    }
+    println!("\n  🏁 {}", dst.display().bold());
+    Ok(())
+}
+
+/// Recording folder to compress: the given path, or the most recently rendered one.
+///
+/// Only requires an `export.mp4` — unlike `Session::open`/`latest`, which also require a
+/// `capture.mp4` that a pruned recording no longer has.
+fn resolve_compress_dir(path: Option<String>) -> Result<std::path::PathBuf> {
+    if let Some(p) = path {
+        let dir = std::path::PathBuf::from(p);
+        if !dir.join("export.mp4").exists() {
+            anyhow::bail!(
+                "{} does not contain an export.mp4 — run `recordo render` first",
+                dir.display()
+            );
+        }
+        return Ok(dir);
+    }
+    let mut entries: Vec<_> = std::fs::read_dir(session::recordings_dir()?)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("export.mp4").exists())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
+    let last = entries
+        .last()
+        .context("no rendered recordings yet — run `recordo render` first")?;
+    Ok(last.path())
 }
 
 fn cmd_windows() -> Result<()> {
