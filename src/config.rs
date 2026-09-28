@@ -67,8 +67,8 @@ pub struct WebcamSettings {
     pub corner_radius: f32,
     /// Mirror the image, so it reads the way a mirror does rather than how others see you.
     pub mirror: bool,
-    /// Seconds to hold a live framing preview on screen before a recording starts. 0
-    /// starts immediately.
+    /// Seconds to hold a live framing preview on screen before a recording starts. The
+    /// same preview stays in the corner while recording. 0 turns both off.
     pub preview_s: f32,
 }
 
@@ -352,7 +352,7 @@ corner_radius = 24.0
 mirror = true
 
 # Seconds to show a live framing preview before a recording starts, so you can check you
-# are in shot. 0 starts recording immediately.
+# are in shot. The same preview stays in the corner while recording. 0 turns both off.
 preview_s = 3.0
 
 [style]

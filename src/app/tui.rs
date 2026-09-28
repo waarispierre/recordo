@@ -573,10 +573,12 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
     // one, so the framing check has to let go first. It is restored below if it was up.
     app.close_preview();
 
-    let preview: Option<(PreviewSink, config::WebcamSettings)> = config
-        .webcam
-        .enabled
-        .then(|| (Arc::new(Mutex::new(None)) as PreviewSink, config.webcam()));
+    // The same setting governs the overlay that stays up while recording: turning the
+    // framing preview off should mean no preview anywhere, not just no pre-roll. With it
+    // off the camera's pixel tap is never added to the session either.
+    let preview: Option<(PreviewSink, config::WebcamSettings)> = (config.webcam.enabled
+        && !pre_roll.is_zero())
+    .then(|| (Arc::new(Mutex::new(None)) as PreviewSink, config.webcam()));
     let preview_for_camera = preview.as_ref().map(|(sink, _)| Arc::clone(sink));
     let label = Rc::new(RefCell::new(None));
 
