@@ -170,6 +170,8 @@ struct App {
     /// Set by the Record tab's Enter key and picked up by the event loop, which — unlike
     /// the key handler — can hand the terminal to [`run_record`].
     pending_record: Option<Target>,
+    /// Start and length of the pre-roll, while one is counting down.
+    countdown: Option<(Instant, Duration)>,
     /// The pre-flight camera, held open while the Record tab shows a framing check. It
     /// owns the device, so [`run_record`] has to close it before a recording can open one.
     preview: Option<(webcam::Preview, PreviewSink, config::WebcamSettings)>,
@@ -197,6 +199,7 @@ impl App {
             job: None,
             recording: None,
             pending_record: None,
+            countdown: None,
             preview: None,
             report: None,
             status: "j/k move · enter select · tab switch · q quit".into(),
@@ -224,22 +227,23 @@ impl App {
             self.status = "preview off".into();
             return;
         }
-        let config = match Config::load_or_create(&self.config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                self.status = format!("could not load config: {e:#}");
-                return;
-            }
-        };
+        match Config::load_or_create(&self.config_path) {
+            Ok(config) => self.open_preview(&config),
+            Err(e) => self.status = format!("could not load config: {e:#}"),
+        }
+    }
+
+    /// Opens the camera for a framing check. Quietly does nothing if it cannot: a camera
+    /// that is missing, in use or denied is a "no preview", not an error worth derailing
+    /// the app over — the same call degrades a recording to screen-only rather than
+    /// failing it.
+    fn open_preview(&mut self, config: &Config) {
         let sink: PreviewSink = Arc::new(Mutex::new(None));
         match webcam::Preview::start(&config.webcam.device, Arc::clone(&sink)) {
             Ok((preview, name)) => {
                 self.status = format!("preview · {name}");
                 self.preview = Some((preview, sink, config.webcam()));
             }
-            // A camera that is missing, in use or denied is a "no preview", not an error
-            // worth derailing the app over — the same call degrades a recording to
-            // screen-only rather than failing it.
             Err(e) => self.status = format!("no preview: {e:#}"),
         }
     }
@@ -475,6 +479,41 @@ fn summarize_compress(
     msg
 }
 
+/// Counts `webcam.preview_s` down on screen with the camera preview up, so there is a
+/// moment to check framing before anything is captured. Returns whether to go ahead:
+/// enter starts early, esc backs out.
+fn count_down(terminal: &mut Tui, app: &mut App, pre_roll: Duration) -> Result<bool> {
+    let started = Instant::now();
+    app.countdown = Some((started, pre_roll));
+
+    let go_ahead = loop {
+        if started.elapsed() >= pre_roll {
+            break true;
+        }
+        terminal.draw(|f| draw(f, app))?;
+
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match (key.code, key.modifiers) {
+            (KeyCode::Char('q'), _)
+            | (KeyCode::Esc, _)
+            | (KeyCode::Char('c'), KeyModifiers::CONTROL) => break false,
+            (KeyCode::Enter, _) | (KeyCode::Char('s'), _) => break true,
+            _ => {}
+        }
+    };
+
+    app.countdown = None;
+    Ok(go_ahead)
+}
+
 /// Captures `target`, drawing the TUI from inside the recorder's own `stop` callback.
 ///
 /// The capture deliberately runs on the main thread. Tearing an `AVCaptureSession` down
@@ -503,6 +542,25 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
         config.webcam.enabled = webcam;
     }
 
+    // With the webcam on, hold the framing check up for a moment before anything is
+    // captured: the camera needs a beat to settle on exposure anyway, and it is the last
+    // chance to notice you are off-centre. Runs before the session folder is created, so
+    // backing out here leaves nothing behind.
+    let had_preview = app.preview.is_some();
+    let pre_roll = Duration::from_secs_f32(config.webcam().preview_s);
+    if config.webcam.enabled && !pre_roll.is_zero() {
+        if app.preview.is_none() {
+            app.open_preview(&config);
+        }
+        if !count_down(terminal, app, pre_roll)? {
+            app.status = "cancelled".into();
+            if !had_preview {
+                app.close_preview();
+            }
+            return Ok(false);
+        }
+    }
+
     let session = match Session::create() {
         Ok(s) => s,
         Err(e) => {
@@ -513,7 +571,7 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
 
     // The recording opens its own session on the camera, and the device only tolerates
     // one, so the framing check has to let go first. It is restored below if it was up.
-    let had_preview = app.close_preview();
+    app.close_preview();
 
     let preview: Option<(PreviewSink, config::WebcamSettings)> = config
         .webcam
@@ -1032,7 +1090,9 @@ fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     draw_tabs(frame, chunks[0], app);
-    if app.recording.is_some() {
+    if app.countdown.is_some() {
+        draw_countdown(frame, chunks[1], app);
+    } else if app.recording.is_some() {
         draw_recording(frame, chunks[1], app);
     } else if app.job.is_some() {
         draw_job(frame, chunks[1], app);
@@ -1128,25 +1188,67 @@ fn draw_record(frame: &mut Frame, area: Rect, app: &mut App) {
         .highlight_symbol("❯ ");
     frame.render_stateful_widget(list, area, &mut app.window_state);
 
-    if let Some((_, sink, cfg)) = &app.preview {
-        let thumb = sink.lock().ok().and_then(|g| g.clone());
-        match thumb {
-            Some(thumb) => draw_webcam_pip(frame, area, cfg, &thumb),
-            // The camera takes a moment to deliver its first frame; saying so beats a
-            // corner that just sits empty.
-            None => {
-                let waiting = Paragraph::new("waking the camera…")
-                    .style(Style::default().fg(Color::DarkGray));
-                let spot = Rect {
-                    x: area.x + 2,
-                    y: area.bottom().saturating_sub(2),
-                    width: area.width.saturating_sub(4).min(20),
-                    height: 1,
-                };
-                frame.render_widget(waiting, spot);
-            }
+    draw_preview(frame, area, app);
+}
+
+/// The pre-flight framing check, in the corner the webcam settings put it.
+fn draw_preview(frame: &mut Frame, area: Rect, app: &App) {
+    let Some((_, sink, cfg)) = &app.preview else {
+        return;
+    };
+    let thumb = sink.lock().ok().and_then(|g| g.clone());
+    match thumb {
+        Some(thumb) => draw_webcam_pip(frame, area, cfg, &thumb),
+        // The camera takes a moment to deliver its first frame; saying so beats a corner
+        // that just sits empty.
+        None => {
+            let waiting =
+                Paragraph::new("waking the camera…").style(Style::default().fg(Color::DarkGray));
+            let spot = Rect {
+                x: area.x + 2,
+                y: area.bottom().saturating_sub(2),
+                width: area.width.saturating_sub(4).min(20),
+                height: 1,
+            };
+            frame.render_widget(waiting, spot);
         }
     }
+}
+
+/// The pre-roll: what is about to be recorded, how long is left, and the camera.
+fn draw_countdown(frame: &mut Frame, area: Rect, app: &App) {
+    let Some((started, pre_roll)) = app.countdown else {
+        return;
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" starting ")
+        .border_style(Style::default().fg(Color::Yellow));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let left = pre_roll.saturating_sub(started.elapsed());
+    // Round up, so a full second is on screen for each number rather than flashing 0.
+    let seconds = left.as_secs() + u64::from(left.subsec_millis() > 0);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("● ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                format!("recording in {seconds}"),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(Span::styled(
+            "check your framing",
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::from(Span::styled(
+            "enter start now · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        )),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+    draw_preview(frame, inner, app);
 }
 
 /// Rows the wordmark occupies: three of block type, a blank, and the tagline.
