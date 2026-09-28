@@ -82,6 +82,18 @@ enum EditKind {
     Setting,
     /// Editing a target size in MB for the recording at this path.
     CompressSize(PathBuf),
+    /// Editing the label that follows the recording's timestamp.
+    Label(PathBuf),
+}
+
+/// A destructive action waiting on a yes/no answer. Nothing here is undoable in place —
+/// a delete goes to the Trash, but dropping the raw files is final — so none of it
+/// happens on a single keystroke.
+enum Confirm {
+    /// Move the whole recording to the Trash.
+    Delete { dir: PathBuf, bytes: u64 },
+    /// Delete the capture and sidecars, keeping the rendered videos.
+    DropRaw { dir: PathBuf, bytes: u64 },
 }
 
 struct Edit {
@@ -152,6 +164,7 @@ struct App {
     recordings: Vec<Session>,
     recording_state: ListState,
     editing: Option<Edit>,
+    confirm: Option<Confirm>,
     job: Option<JobHandle>,
     recording: Option<Recording>,
     /// Set by the Record tab's Enter key and picked up by the event loop, which — unlike
@@ -177,6 +190,7 @@ impl App {
             recordings: session::all_sessions().unwrap_or_default(),
             recording_state: ListState::default(),
             editing: None,
+            confirm: None,
             job: None,
             recording: None,
             pending_record: None,
@@ -198,6 +212,17 @@ impl App {
     fn reload_settings(&mut self) -> Result<()> {
         self.settings = config::settings(&self.config_path)?;
         Ok(())
+    }
+
+    /// Re-reads the recordings and keeps the cursor on something that still exists — the
+    /// list shrinks under it when a recording is deleted.
+    fn reload_recordings(&mut self) {
+        self.recordings = session::all_sessions().unwrap_or_default();
+        let selected = match self.recordings.len() {
+            0 => None,
+            len => Some(self.recording_state.selected().unwrap_or(0).min(len - 1)),
+        };
+        self.recording_state.select(selected);
     }
 
     fn selected_len(&self) -> usize {
@@ -616,6 +641,10 @@ fn event_loop(terminal: &mut Tui, overrides: &RecordOverrides) -> Result<Option<
             }
             continue;
         }
+        if app.confirm.is_some() {
+            handle_confirm_key(&mut app, key);
+            continue;
+        }
         if app.editing.is_some() {
             handle_edit_key(&mut app, key)?;
             continue;
@@ -691,6 +720,53 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
                 app.start_render(dir);
             }
         }
+        (KeyCode::Char('d'), _) if app.tab == Tab::Recordings => {
+            if let Some(s) = app
+                .recording_state
+                .selected()
+                .and_then(|i| app.recordings.get(i))
+            {
+                app.confirm = Some(Confirm::Delete {
+                    dir: s.dir.clone(),
+                    bytes: s.bytes(),
+                });
+            }
+        }
+        (KeyCode::Char('p'), _) if app.tab == Tab::Recordings => {
+            if let Some(s) = app
+                .recording_state
+                .selected()
+                .and_then(|i| app.recordings.get(i))
+            {
+                let bytes = s.raw_bytes();
+                if bytes == 0 {
+                    app.status = "nothing but the rendered video is left here".into();
+                } else if !s.has_export() {
+                    // Without an export the raw capture is the only copy there is.
+                    app.status = "render it first — the capture is the only copy".into();
+                } else {
+                    app.confirm = Some(Confirm::DropRaw {
+                        dir: s.dir.clone(),
+                        bytes,
+                    });
+                }
+            }
+        }
+        (KeyCode::Char('n'), _) if app.tab == Tab::Recordings => {
+            if let Some(s) = app
+                .recording_state
+                .selected()
+                .and_then(|i| app.recordings.get(i))
+            {
+                app.editing = Some(Edit {
+                    kind: EditKind::Label(s.dir.clone()),
+                    // Prefilled, unlike the other fields: a rename is usually a tweak to
+                    // the label that is already there.
+                    buffer: s.label().unwrap_or_default(),
+                });
+                app.status = "name it — enter to rename, esc to cancel".into();
+            }
+        }
         (KeyCode::Char('c'), _) if app.tab == Tab::Recordings => {
             if let Some(s) = app
                 .recording_state
@@ -751,6 +827,35 @@ fn handle_key(app: &mut App, key: KeyEvent) -> bool {
     false
 }
 
+/// Answers the confirmation popup. Anything other than an explicit yes cancels, so a
+/// stray keypress can never be the thing that deletes a recording.
+fn handle_confirm_key(app: &mut App, key: KeyEvent) {
+    let Some(confirm) = app.confirm.take() else {
+        return;
+    };
+    if !matches!(key.code, KeyCode::Char('y') | KeyCode::Char('Y')) {
+        app.status = "cancelled".into();
+        return;
+    }
+
+    let mb = |b: u64| b as f64 / 1_000_000.0;
+    // Built directly rather than through `Session::open`, which insists on a capture.mp4
+    // that a already-pruned recording no longer has.
+    let outcome = match confirm {
+        Confirm::Delete { dir, bytes } => Session { dir }
+            .trash()
+            .map(|()| format!("moved to Trash · {:.1} MB", mb(bytes))),
+        Confirm::DropRaw { dir, bytes } => Session { dir }
+            .drop_raw()
+            .map(|()| format!("raw files deleted · freed {:.1} MB", mb(bytes))),
+    };
+    app.status = match outcome {
+        Ok(msg) => msg,
+        Err(e) => format!("failed: {e:#}"),
+    };
+    app.reload_recordings();
+}
+
 fn handle_edit_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match key.code {
         KeyCode::Esc => {
@@ -772,12 +877,29 @@ fn handle_edit_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 return Ok(());
             };
             let value = edit.buffer.trim().to_string();
-            if value.is_empty() {
+            // Blank means "leave it alone" everywhere except a label, where it is how you
+            // take one off again.
+            if value.is_empty() && !matches!(edit.kind, EditKind::Label(_)) {
                 app.status = "unchanged".into();
                 return Ok(());
             }
             match edit.kind {
                 EditKind::Setting => handle_setting_edit(app, value)?,
+                EditKind::Label(dir) => {
+                    let mut session = Session { dir };
+                    app.status = match session.set_label(&value) {
+                        Ok(()) => format!(
+                            "renamed to {}",
+                            session
+                                .dir
+                                .file_name()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                        ),
+                        Err(e) => format!("failed: {e:#}"),
+                    };
+                    app.reload_recordings();
+                }
                 EditKind::CompressSize(dir) => match value.parse::<f64>() {
                     Ok(mb) if mb.is_finite() && mb > 0.0 => app.start_compress(dir, mb),
                     _ => {
@@ -872,9 +994,14 @@ fn draw(frame: &mut Frame, app: &mut App) {
         }
     }
     draw_status(frame, chunks[2], app);
+    // Last, so it can see what the panel actually drew and stay out of its way.
+    draw_wordmark(frame, chunks[1]);
 
     if app.editing.is_some() {
         draw_edit_popup(frame, app);
+    }
+    if app.confirm.is_some() {
+        draw_confirm_popup(frame, app);
     }
     if app.report.is_some() {
         draw_report_popup(frame, app);
@@ -935,20 +1062,6 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_record(frame: &mut Frame, area: Rect, app: &mut App) {
-    // The window list rarely fills the tab; give the slack to the wordmark rather than to
-    // a box of empty rows.
-    let list_rows = app.windows.labels.len() as u16 + 2;
-    let (list_area, mark_area) = if area.height > list_rows + WORDMARK_ROWS {
-        let parts = Layout::vertical([
-            Constraint::Length(list_rows),
-            Constraint::Min(WORDMARK_ROWS),
-        ])
-        .split(area);
-        (parts[0], Some(parts[1]))
-    } else {
-        (area, None)
-    };
-
     let items: Vec<ListItem> = app
         .windows
         .labels
@@ -963,41 +1076,70 @@ fn draw_record(frame: &mut Frame, area: Rect, app: &mut App) {
         )
         .highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan))
         .highlight_symbol("❯ ");
-    frame.render_stateful_widget(list, list_area, &mut app.window_state);
-
-    if let Some(mark_area) = mark_area {
-        draw_wordmark(frame, mark_area);
-    }
+    frame.render_stateful_widget(list, area, &mut app.window_state);
 }
 
 /// Rows the wordmark occupies: three of block type, a blank, and the tagline.
 const WORDMARK_ROWS: u16 = 5;
 
-/// A block-type "RECORDO", centred in whatever space the Record tab has left over.
+/// A block-type "RECORDO" watermark, centred in `area`.
+///
+/// Drawn after the panel and only into a block of cells the panel left completely empty.
+/// Interleaving it with content does not read as a backdrop — against a full settings list
+/// the letterforms land between the keys and their values and just make both harder to
+/// read — so when the middle of the screen is occupied the mark stands down entirely
+/// rather than moving somewhere it fits.
 fn draw_wordmark(frame: &mut Frame, area: Rect) {
-    // One 3x3 glyph per letter, joined by a space — small enough to render identically in
-    // any font, unlike the taller ASCII-art banners that need a specific aspect ratio.
-    const GLYPHS: [[&str; 3]; 7] = [
-        ["███", "█▀▄", "█ ▀"], // R
-        ["███", "██ ", "███"], // E
-        ["███", "█  ", "███"], // C
-        ["███", "█ █", "███"], // O
-        ["███", "█▀▄", "█ ▀"], // R
-        ["██ ", "█ █", "██ "], // D
-        ["███", "█ █", "███"], // O
+    // Letterforms are six pixels tall but drawn in three terminal rows, folded together by
+    // the same half-block trick the webcam overlay uses. Three rows of whole cells is the
+    // height that fits here, and at that size solid cells are too coarse to tell an R from
+    // a D; the half-blocks buy back the vertical detail that makes it read as a word.
+    #[rustfmt::skip]
+    const GLYPHS: [[&str; 6]; 7] = [
+        ["████ ", "█   █", "█   █", "████ ", "█  █ ", "█   █"], // R
+        ["█████", "█    ", "████ ", "█    ", "█    ", "█████"], // E
+        [" ████", "█    ", "█    ", "█    ", "█    ", " ████"], // C
+        [" ███ ", "█   █", "█   █", "█   █", "█   █", " ███ "], // O
+        ["████ ", "█   █", "█   █", "████ ", "█  █ ", "█   █"], // R
+        ["████ ", "█   █", "█   █", "█   █", "█   █", "████ "], // D
+        [" ███ ", "█   █", "█   █", "█   █", "█   █", " ███ "], // O
     ];
     const TAGLINE: &str = "screen recordings with a cursor-following camera";
 
-    let width = GLYPHS.len() as u16 * 4 - 1;
-    if area.width < width.max(TAGLINE.len() as u16) || area.height < WORDMARK_ROWS {
+    let pixel_rows: Vec<String> = (0..6)
+        .map(|r| GLYPHS.iter().map(|g| g[r]).collect::<Vec<_>>().join("  "))
+        .collect();
+    let width = (pixel_rows[0].chars().count() as u16).max(TAGLINE.len() as u16);
+    if area.width < width || area.height < WORDMARK_ROWS {
         return;
     }
 
-    let mut lines: Vec<Line> = (0..3)
-        .map(|row| {
-            let text: Vec<&str> = GLYPHS.iter().map(|g| g[row]).collect();
+    let x = area.x + (area.width - width) / 2;
+    let Some(y) = clear_band(frame.buffer_mut(), area, x, width) else {
+        return;
+    };
+    let placed = Rect {
+        x,
+        y,
+        width,
+        height: WORDMARK_ROWS,
+    };
+
+    let mut lines: Vec<Line> = pixel_rows
+        .chunks(2)
+        .map(|pair| {
+            let text: String = pair[0]
+                .chars()
+                .zip(pair[1].chars())
+                .map(|(top, bottom)| match (top != ' ', bottom != ' ') {
+                    (true, true) => '█',
+                    (true, false) => '▀',
+                    (false, true) => '▄',
+                    (false, false) => ' ',
+                })
+                .collect();
             Line::from(Span::styled(
-                text.join(" "),
+                text,
                 Style::default().fg(Color::Rgb(96, 68, 132)),
             ))
             .centered()
@@ -1007,20 +1149,48 @@ fn draw_wordmark(frame: &mut Frame, area: Rect) {
     lines.push(
         Line::from(Span::styled(
             TAGLINE,
-            Style::default().fg(Color::Rgb(70, 60, 88)),
+            Style::default().fg(Color::Rgb(48, 41, 62)),
         ))
         .centered(),
     );
 
-    // Centre vertically too, so the mark sits in the middle of the free space.
-    let top = area.y + (area.height.saturating_sub(WORDMARK_ROWS)) / 2;
-    let placed = Rect {
-        x: area.x,
-        y: top,
-        width: area.width,
-        height: WORDMARK_ROWS.min(area.height),
-    };
     frame.render_widget(Paragraph::new(lines), placed);
+}
+
+/// Top row at which [`WORDMARK_ROWS`] rows fit in the tallest run of rows the panel left
+/// untouched across the mark's columns, centred within that run. `None` when no run is
+/// tall enough, which is how a full settings list keeps the mark off the screen entirely.
+///
+/// Centring in the free space rather than in the panel is what keeps the mark on screen at
+/// all: a list whose last row happens to reach the middle would otherwise hide it.
+fn clear_band(buf: &ratatui::buffer::Buffer, area: Rect, x: u16, width: u16) -> Option<u16> {
+    let blank_row = |y: u16| (x..x + width).all(|x| buf[(x, y)].symbol() == " ");
+
+    let mut best: Option<(u16, u16)> = None;
+    let mut start: Option<u16> = None;
+    let close = |start: u16, end: u16, best: &mut Option<(u16, u16)>| {
+        let len = end - start;
+        if best.is_none_or(|(_, longest)| len > longest) {
+            *best = Some((start, len));
+        }
+    };
+
+    for y in area.top()..area.bottom() {
+        match (blank_row(y), start) {
+            (true, None) => start = Some(y),
+            (false, Some(s)) => {
+                close(s, y, &mut best);
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    if let Some(s) = start {
+        close(s, area.bottom(), &mut best);
+    }
+
+    best.filter(|(_, len)| *len >= WORDMARK_ROWS)
+        .map(|(start, len)| start + (len - WORDMARK_ROWS) / 2)
 }
 
 fn draw_settings(frame: &mut Frame, area: Rect, app: &mut App) {
@@ -1147,6 +1317,7 @@ fn draw_recording(frame: &mut Frame, area: Rect, app: &App) {
     )));
     frame.render_widget(Paragraph::new(lines), inner);
 
+    // Drawn last so the overlay sits on top of the mark rather than under it.
     if let Some((sink, cfg)) = &rec.preview {
         let thumb = sink.lock().ok().and_then(|g| g.clone());
         if let Some(thumb) = thumb {
@@ -1211,9 +1382,18 @@ fn draw_webcam_pip(
         return;
     }
     let corner = recordo::pip::Corner::parse(&cfg.position);
+    let circle = cfg.shape == "circle";
+    // A circular overlay is cropped to a square before the renderer masks it (see
+    // `pip::pip_rect`), so the preview crops the same way — otherwise it would show
+    // framing at the edges that the finished video does not have.
+    let aspect = if circle {
+        1.0
+    } else {
+        thumb.w as f32 / thumb.h as f32
+    };
     // A cell is about twice as tall as it is wide, and the half-block trick fits two
     // source rows into each one, so a frame needs double the columns to not look squashed.
-    let aspect = thumb.w as f32 / thumb.h as f32 * 2.0;
+    let aspect = aspect * 2.0;
     // The configured percentage is authored against an exported frame of a thousand-odd
     // pixels; in a couple of dozen terminal rows the same number is too small to frame a
     // face by, so it only steers within a range that stays legible.
@@ -1244,7 +1424,6 @@ fn draw_webcam_pip(
     };
 
     frame.render_widget(Clear, box_area);
-    let circle = cfg.shape == "circle";
     let round_corners = !circle && cfg.corner_radius > 0.0;
     let lines = render_half_blocks(
         thumb,
@@ -1272,43 +1451,60 @@ fn render_half_blocks(
 ) -> Vec<Line<'static>> {
     let cols = cols.max(1);
     let rows = rows.max(1);
-    let sample = |sx: u32, sy: u32| -> (u8, u8, u8) {
-        let sx = sx.min(thumb.w.saturating_sub(1));
-        let sy = sy.min(thumb.h.saturating_sub(1));
+    // Half-pixel rows: the unit the mask and the sampling both work in.
+    let subrows = rows * 2;
+
+    // A circle is masked out of a centred square, the same crop the renderer applies, so
+    // the two agree on what is actually in frame.
+    let (win_x, win_y, win_w, win_h) = if circle {
+        let side = thumb.w.min(thumb.h);
+        ((thumb.w - side) / 2, (thumb.h - side) / 2, side, side)
+    } else {
+        (0, 0, thumb.w, thumb.h)
+    };
+
+    let sample = |col: u16, subrow: u16| -> Color {
+        let nx = (col as f32 + 0.5) / cols as f32;
+        let nx = if mirror { 1.0 - nx } else { nx };
+        let ny = (subrow as f32 + 0.5) / subrows as f32;
+        let sx = win_x + ((nx * win_w as f32) as u32).min(win_w.saturating_sub(1));
+        let sy = win_y + ((ny * win_h as f32) as u32).min(win_h.saturating_sub(1));
         let i = ((sy * thumb.w + sx) * 3) as usize;
-        (thumb.rgb[i], thumb.rgb[i + 1], thumb.rgb[i + 2])
+        Color::Rgb(thumb.rgb[i], thumb.rgb[i + 1], thumb.rgb[i + 2])
+    };
+
+    // Masking per half-pixel rather than per cell is what keeps the edge of a circle
+    // smooth: a cell whose top half is outside and bottom half inside still gets drawn,
+    // as a lower half block.
+    let shown = |col: u16, subrow: u16| -> bool {
+        if round_corners && (col == 0 || col == cols - 1) && (subrow < 2 || subrow >= subrows - 2) {
+            return false;
+        }
+        if !circle {
+            return true;
+        }
+        let x = (col as f32 + 0.5) / cols as f32 - 0.5;
+        let y = (subrow as f32 + 0.5) / subrows as f32 - 0.5;
+        x * x + y * y <= 0.25
     };
 
     let mut lines = Vec::with_capacity(rows as usize);
     for row in 0..rows {
         let mut spans = Vec::with_capacity(cols as usize);
         for col in 0..cols {
-            let corner_cell =
-                round_corners && (col == 0 || col == cols - 1) && (row == 0 || row == rows - 1);
-            let masked = corner_cell
-                || (circle && {
-                    let cx = (col as f32 + 0.5) / cols as f32 - 0.5;
-                    let cy = (row as f32 + 0.5) / rows as f32 - 0.5;
-                    cx * cx + cy * cy > 0.25
-                });
-            if masked {
-                spans.push(Span::raw(" "));
-                continue;
-            }
-
-            let nx = (col as f32 + 0.5) / cols as f32;
-            let nx = if mirror { 1.0 - nx } else { nx };
-            let sx = (nx * thumb.w as f32) as u32;
-            let sy_top = ((row as f32 * 2.0 + 0.5) / (rows as f32 * 2.0) * thumb.h as f32) as u32;
-            let sy_bot = ((row as f32 * 2.0 + 1.5) / (rows as f32 * 2.0) * thumb.h as f32) as u32;
-            let (r1, g1, b1) = sample(sx, sy_top);
-            let (r2, g2, b2) = sample(sx, sy_bot);
-            spans.push(Span::styled(
-                "▀",
-                Style::default()
-                    .fg(Color::Rgb(r1, g1, b1))
-                    .bg(Color::Rgb(r2, g2, b2)),
-            ));
+            let (top, bottom) = (row * 2, row * 2 + 1);
+            let span = match (shown(col, top), shown(col, bottom)) {
+                (true, true) => Span::styled(
+                    "▀",
+                    Style::default()
+                        .fg(sample(col, top))
+                        .bg(sample(col, bottom)),
+                ),
+                (true, false) => Span::styled("▀", Style::default().fg(sample(col, top))),
+                (false, true) => Span::styled("▄", Style::default().fg(sample(col, bottom))),
+                (false, false) => Span::raw(" "),
+            };
+            spans.push(span);
         }
         lines.push(Line::from(spans));
     }
@@ -1319,7 +1515,7 @@ fn draw_status(frame: &mut Frame, area: Rect, app: &App) {
     let keys = match app.tab {
         Tab::Record => "enter record · tab switch · q quit",
         Tab::Settings => "enter edit · tab switch · q quit",
-        Tab::Recordings => "enter open · r re-render · c compress · tab switch · q quit",
+        Tab::Recordings => "enter open · r render · c compress · n name · p drop raw · d delete",
     };
     let line = Line::from(vec![
         Span::styled(
@@ -1366,6 +1562,10 @@ fn draw_edit_popup(frame: &mut Frame, app: &App) {
                 "target size in MB, e.g. 25".to_string(),
             )
         }
+        EditKind::Label(_) => (
+            "name".to_string(),
+            "a label kept after the timestamp · blank removes it".to_string(),
+        ),
     };
 
     let area = centered(60, 30, frame.area());
@@ -1389,6 +1589,69 @@ fn draw_edit_popup(frame: &mut Frame, app: &App) {
                 .borders(Borders::ALL)
                 .title(format!(" {title} "))
                 .border_style(Style::default().fg(Color::Cyan)),
+        ),
+        area,
+    );
+}
+
+/// Asks before anything irreversible, spelling out what goes and how much it frees.
+fn draw_confirm_popup(frame: &mut Frame, app: &App) {
+    let Some(confirm) = app.confirm.as_ref() else {
+        return;
+    };
+    let mb = |b: u64| b as f64 / 1_000_000.0;
+    let name = |dir: &PathBuf| {
+        dir.file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string()
+    };
+
+    let (title, body) = match confirm {
+        Confirm::Delete { dir, bytes } => (
+            " delete recording ",
+            vec![
+                Line::from(name(dir)),
+                Line::from(""),
+                Line::from(format!(
+                    "moves the whole folder to the Trash, {:.1} MB",
+                    mb(*bytes)
+                )),
+                Line::from("the rendered video goes with it"),
+            ],
+        ),
+        Confirm::DropRaw { dir, bytes } => (
+            " delete raw files ",
+            vec![
+                Line::from(name(dir)),
+                Line::from(""),
+                Line::from(format!(
+                    "deletes the capture and sidecars, freeing {:.1} MB",
+                    mb(*bytes)
+                )),
+                Line::from("the rendered videos stay · this one is not undoable"),
+            ],
+        ),
+    };
+
+    let area = centered(56, 34, frame.area());
+    frame.render_widget(Clear, area);
+
+    let mut lines = body;
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("y", Style::default().fg(Color::Red)),
+        Span::styled(
+            " yes · any other key cancels",
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]));
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .border_style(Style::default().fg(Color::Red)),
         ),
         area,
     );
@@ -1426,4 +1689,67 @@ fn centered(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         Constraint::Percentage((100 - percent_x) / 2),
     ])
     .split(vertical[1])[1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A flat mid-grey frame, so a rendered cell is only ever "drawn" or "masked".
+    fn grey(w: u32, h: u32) -> PreviewFrame {
+        PreviewFrame {
+            rgb: vec![128; (w * h * 3) as usize],
+            w,
+            h,
+        }
+    }
+
+    fn shape(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_rectangular_overlay_fills_every_cell() {
+        let rendered = render_half_blocks(&grey(32, 24), 10, 4, false, false, false);
+        assert_eq!(shape(&rendered), vec!["▀".repeat(10); 4]);
+    }
+
+    #[test]
+    fn a_circular_overlay_is_masked_symmetrically() {
+        let rows = 5;
+        let cols = rows * 2;
+        let rendered = render_half_blocks(&grey(32, 32), cols, rows, true, false, false);
+        let drawn = shape(&rendered);
+
+        for (i, line) in drawn.iter().enumerate() {
+            let chars: Vec<char> = line.chars().collect();
+            assert_eq!(chars.len(), cols as usize);
+            // Left and right halves mirror each other, and top and bottom rows mirror
+            // vertically — a lopsided circle is the bug this guards against.
+            let flipped: String = chars.iter().rev().collect();
+            assert_eq!(*line, flipped, "row {i} is not left-right symmetric");
+        }
+
+        // The corners are outside the circle and the middle row is solid.
+        assert!(
+            drawn[0].starts_with(' '),
+            "top-left corner should be masked"
+        );
+        assert_eq!(drawn[(rows / 2) as usize], "▀".repeat(cols as usize));
+    }
+
+    #[test]
+    fn mirroring_does_not_change_which_cells_are_drawn() {
+        let plain = render_half_blocks(&grey(32, 32), 12, 6, true, false, false);
+        let mirrored = render_half_blocks(&grey(32, 32), 12, 6, true, false, true);
+        assert_eq!(shape(&plain), shape(&mirrored));
+    }
 }

@@ -471,13 +471,7 @@ fn cmd_prune(older_than: Option<u64>, all: bool, yes: bool) -> Result<()> {
 
     let freed: u64 = targets
         .iter()
-        .map(|s| {
-            if all {
-                dir_bytes(&s.dir)
-            } else {
-                s.raw_bytes()
-            }
-        })
+        .map(|s| if all { s.bytes() } else { s.raw_bytes() })
         .sum();
 
     println!();
@@ -530,18 +524,6 @@ fn cmd_prune(older_than: Option<u64>, all: bool, yes: bool) -> Result<()> {
         freed as f64 / 1_048_576.0
     );
     Ok(())
-}
-
-fn dir_bytes(dir: &std::path::Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.metadata().ok())
-                .map(|m| m.len())
-                .sum()
-        })
-        .unwrap_or(0)
 }
 
 fn cmd_config(action: &ConfigAction) -> Result<()> {
