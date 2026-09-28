@@ -565,14 +565,23 @@ pub fn run(overrides: &RecordOverrides) -> Result<()> {
     disable_raw_mode().ok();
     execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
     terminal.show_cursor().ok();
-    result
+
+    // Quitting mid-recording still finalises the capture, so say where it went — the
+    // popup that would normally carry that never gets a frame to be drawn in.
+    let farewell = result?;
+    if let Some(msg) = farewell {
+        println!("  {msg}");
+    }
+    Ok(())
 }
 
 // Concrete rather than generic over Backend: ratatui 0.30's associated error type is not
 // Send + Sync, so it cannot flow through anyhow from a generic context.
 type Tui = Terminal<CrosstermBackend<std::io::Stdout>>;
 
-fn event_loop(terminal: &mut Tui, overrides: &RecordOverrides) -> Result<()> {
+/// Returns a message to print once the terminal is back, if quitting left something the
+/// user would otherwise never see.
+fn event_loop(terminal: &mut Tui, overrides: &RecordOverrides) -> Result<Option<String>> {
     let mut app = App::new(overrides.clone())?;
 
     loop {
@@ -583,7 +592,7 @@ fn event_loop(terminal: &mut Tui, overrides: &RecordOverrides) -> Result<()> {
         if let Some(target) = app.pending_record.take()
             && run_record(terminal, &mut app, target)?
         {
-            return Ok(());
+            return Ok(app.report.take());
         }
 
         if !event::poll(Duration::from_millis(100))? {
@@ -603,7 +612,7 @@ fn event_loop(terminal: &mut Tui, overrides: &RecordOverrides) -> Result<()> {
         }
         if app.job.is_some() {
             if handle_job_key(&mut app, key) {
-                return Ok(());
+                return Ok(None);
             }
             continue;
         }
@@ -612,7 +621,7 @@ fn event_loop(terminal: &mut Tui, overrides: &RecordOverrides) -> Result<()> {
             continue;
         }
         if handle_key(&mut app, key) {
-            return Ok(());
+            return Ok(None);
         }
     }
 }
