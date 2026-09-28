@@ -179,6 +179,78 @@ impl Session {
         Ok(())
     }
 
+    /// Every byte the folder holds, raw and rendered alike.
+    pub fn bytes(&self) -> u64 {
+        std::fs::read_dir(&self.dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|e| e.ok())
+                    .filter_map(|e| e.metadata().ok())
+                    .map(|m| m.len())
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+
+    /// The part of the folder name after the timestamp, if it has been labelled.
+    pub fn label(&self) -> Option<String> {
+        let name = self.dir.file_name()?.to_str()?;
+        // `YYYY-MM-DD_HH-MM-SS_label`: the stamp is the first two underscore-separated
+        // fields, anything after that is the label.
+        let rest = name.splitn(3, '_').nth(2)?;
+        (!rest.is_empty()).then(|| rest.to_string())
+    }
+
+    /// Renames the folder to carry `label`, keeping its timestamp prefix. An empty label
+    /// removes one that was there.
+    ///
+    /// The timestamp is deliberately not up for editing: [`age_days`](Self::age_days)
+    /// reads a recording's age straight off the folder name, and `all_sessions` sorts by
+    /// it, so a free-form name would quietly drop the recording out of `prune
+    /// --older-than` and confuse which recording counts as the latest.
+    pub fn set_label(&mut self, label: &str) -> Result<()> {
+        let name = self
+            .dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .context("recording has no folder name")?;
+        let stamp: Vec<&str> = name.splitn(3, '_').take(2).collect();
+        let stamp = stamp.join("_");
+
+        let label = sanitize_label(label);
+        let renamed = if label.is_empty() {
+            stamp
+        } else {
+            format!("{stamp}_{label}")
+        };
+        let target = self
+            .dir
+            .parent()
+            .context("recording has no parent directory")?
+            .join(&renamed);
+        if target == self.dir {
+            return Ok(());
+        }
+        if target.exists() {
+            anyhow::bail!("{renamed} already exists");
+        }
+        std::fs::rename(&self.dir, &target)
+            .with_context(|| format!("rename {} to {renamed}", self.dir.display()))?;
+        self.dir = target;
+        Ok(())
+    }
+
+    /// Moves the whole recording to the Trash, so a mistaken delete stays recoverable.
+    pub fn trash(&self) -> Result<()> {
+        use objc2_foundation::{NSFileManager, NSString, NSURL};
+
+        let path = NSString::from_str(&self.dir.to_string_lossy());
+        let url = NSURL::fileURLWithPath(&path);
+        NSFileManager::defaultManager()
+            .trashItemAtURL_resultingItemURL_error(&url, None)
+            .map_err(|e| anyhow::anyhow!("could not move to Trash: {e}"))
+    }
+
     /// Age in days, derived from the folder name rather than mtime, which re-rendering
     /// would otherwise reset.
     pub fn age_days(&self) -> Option<u64> {
@@ -217,6 +289,21 @@ pub fn all_sessions() -> Result<Vec<Session>> {
         .into_iter()
         .map(|e| Session { dir: e.path() })
         .collect())
+}
+
+/// Folder-safe form of a typed label. A rename lands in a filesystem path, so rather than
+/// rejecting awkward input this reduces it to letters, digits and dashes — which also
+/// stops `..` or a stray separator from climbing out of the recordings directory.
+fn sanitize_label(label: &str) -> String {
+    let mut out = String::with_capacity(label.len());
+    for c in label.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
 }
 
 fn timestamp() -> String {
@@ -293,5 +380,42 @@ mod tests {
         assert_eq!(civil_from_days(19_723), (2024, 1, 1));
         // A leap day, the case most likely to be off by one.
         assert_eq!(civil_from_days(19_782), (2024, 2, 29));
+    }
+
+    #[test]
+    fn a_label_keeps_only_characters_a_folder_name_can_carry() {
+        use super::sanitize_label;
+        assert_eq!(sanitize_label("onboarding demo"), "onboarding-demo");
+        assert_eq!(sanitize_label("  spaced  out  "), "spaced-out");
+        assert_eq!(sanitize_label("v2.1 (final)"), "v2-1-final");
+    }
+
+    #[test]
+    fn a_label_cannot_climb_out_of_the_recordings_directory() {
+        use super::sanitize_label;
+        // The label is pasted straight into a path, so separators and dot segments are
+        // the cases that matter.
+        assert_eq!(sanitize_label("../../etc/passwd"), "etc-passwd");
+        assert_eq!(sanitize_label("/absolute"), "absolute");
+        assert_eq!(sanitize_label(".."), "");
+        assert_eq!(sanitize_label("///"), "");
+    }
+
+    #[test]
+    fn a_labelled_folder_still_reports_its_timestamp_and_label() {
+        use super::Session;
+        use std::path::PathBuf;
+
+        let plain = Session {
+            dir: PathBuf::from("/tmp/2026-09-28_11-06-17"),
+        };
+        assert_eq!(plain.label(), None);
+
+        let labelled = Session {
+            dir: PathBuf::from("/tmp/2026-09-28_11-06-17_onboarding-demo"),
+        };
+        assert_eq!(labelled.label().as_deref(), Some("onboarding-demo"));
+        // Age is read off the folder name, so labelling must not break it.
+        assert!(labelled.age_days().is_some());
     }
 }

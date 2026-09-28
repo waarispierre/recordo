@@ -67,6 +67,9 @@ pub struct WebcamSettings {
     pub corner_radius: f32,
     /// Mirror the image, so it reads the way a mirror does rather than how others see you.
     pub mirror: bool,
+    /// Seconds to hold a live framing preview on screen before a recording starts. The
+    /// same preview stays in the corner while recording. 0 turns both off.
+    pub preview_s: f32,
 }
 
 impl Default for WebcamSettings {
@@ -81,6 +84,7 @@ impl Default for WebcamSettings {
             shape: "circle".into(),
             corner_radius: 24.0,
             mirror: true,
+            preview_s: 3.0,
         }
     }
 }
@@ -225,6 +229,9 @@ impl Config {
             shape: w.shape.clone(),
             corner_radius: w.corner_radius.max(0.0),
             mirror: w.mirror,
+            // A pre-roll is a pause before the thing you asked for; long enough to check
+            // framing is the point, long enough to be annoying is not.
+            preview_s: w.preview_s.clamp(0.0, 10.0),
         }
     }
 
@@ -343,6 +350,10 @@ corner_radius = 24.0
 
 # Mirror the image, so it reads the way a mirror does.
 mirror = true
+
+# Seconds to show a live framing preview before a recording starts, so you can check you
+# are in shot. The same preview stays in the corner while recording. 0 turns both off.
+preview_s = 3.0
 
 [style]
 # All lengths below are in POINTS and scale with the capture, so the look is the same

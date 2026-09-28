@@ -162,6 +162,7 @@ pub fn render(session: &Session, out: &std::path::Path, zoom: Option<f64>) -> Re
         &session.capture().to_string_lossy(),
         &out.to_string_lossy(),
         zoom,
+        None,
     );
     bar.finish_and_clear();
 

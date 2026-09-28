@@ -57,6 +57,7 @@ objc2-av-foundation = { version = "0.3", features = [
     "dispatch2",
 ] }
 objc2-core-media = "0.3"
+objc2-core-video = { version = "0.3", features = ["CVPixelBuffer", "CVBase", "CVReturn", "std"] }
 dispatch2 = "0.3"
 objc2-foundation = "0.3"
 # macos_15_0 gates SCRecordingOutput (direct stream-to-file).

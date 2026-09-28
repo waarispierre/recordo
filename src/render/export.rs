@@ -64,11 +64,17 @@ impl Report {
 }
 
 pub fn run(src: &str, dst: &str) -> Result<()> {
-    run_with(src, dst, None).map(|_| ())
+    run_with(src, dst, None, None).map(|_| ())
 }
 
-/// As [`run`], with an optional zoom-percentage override for this render only.
-pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Report> {
+/// As [`run`], with an optional zoom-percentage override for this render only, and an
+/// optional callback invoked once per rendered frame with `(frames done, frames total)`.
+pub fn run_with(
+    src: &str,
+    dst: &str,
+    zoom_percent: Option<f64>,
+    progress: Option<&dyn Fn(usize, usize)>,
+) -> Result<Report> {
     // ffmpeg has no `--` terminator, so a path starting with '-' becomes an option.
     crate::tools::check_not_option_like("input", src)?;
     crate::tools::check_not_option_like("output", dst)?;
@@ -415,6 +421,9 @@ pub fn run_with(src: &str, dst: &str, zoom_percent: Option<f64>) -> Result<Repor
             Err(e) => return Err(e).context("write frame to encoder"),
         }
         rendered += 1;
+        if let Some(cb) = progress {
+            cb(rendered, zooms.len());
+        }
     }
 
     drop(enc_in);

@@ -183,6 +183,11 @@ fn scale_for(content: &SCShareableContent, window: &Option<SCWindow>) -> Result<
 }
 
 /// Records until `stop` returns, writing the capture and its sidecars into `session`.
+///
+/// `preview`, when given, receives a small downsampled frame every so often while the
+/// webcam is recording, for a caller that wants to show a live thumbnail (the TUI's
+/// corner picture-in-picture) without opening a second capture session on the same
+/// device. `None` costs nothing extra — no second output is added to the session.
 pub fn record(
     session: &Session,
     target: &Target,
@@ -190,6 +195,7 @@ pub fn record(
     chooser: impl FnOnce(&[SCWindow]) -> Result<Option<SCWindow>>,
     on_start: impl FnOnce(&Plan),
     stop: impl FnOnce(),
+    preview: Option<crate::capture::webcam::PreviewSink>,
 ) -> Result<()> {
     let content = SCShareableContent::get().context("grant Screen Recording permission")?;
     let display = content
@@ -296,7 +302,11 @@ pub fn record(
     });
 
     let webcam = if config.webcam.enabled {
-        match crate::capture::webcam::Webcam::start(&config.webcam.device, &session.camera()) {
+        match crate::capture::webcam::Webcam::start(
+            &config.webcam.device,
+            &session.camera(),
+            preview,
+        ) {
             Ok((cam, name)) => {
                 plan.webcam = Some(name);
                 Some(cam)
