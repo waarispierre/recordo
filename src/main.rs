@@ -181,43 +181,27 @@ fn run() -> Result<()> {
     }
 }
 
-/// Drives the TUI, suspending it whenever a long-running job needs the plain terminal.
+/// Drives the TUI. Jobs run inside it now, so this only has to hand over the flags that
+/// would otherwise be lost: a bare `recordo --zoom 30` still opens the full-screen app.
 fn run_tui(cli: &Cli) -> Result<()> {
-    loop {
-        match app::tui::run()? {
-            app::tui::Action::Quit => return Ok(()),
-            app::tui::Action::Record(target) => {
-                let outcome = cmd_record(cli, target);
-                report_and_pause(outcome)?;
-            }
-            app::tui::Action::Render(dir) => {
-                let outcome = cmd_render(cli, Some(dir.to_string_lossy().into_owned()));
-                report_and_pause(outcome)?;
-            }
-            app::tui::Action::Compress(dir, max_mb) => {
-                let outcome = cmd_compress(Some(dir.to_string_lossy().into_owned()), max_mb);
-                report_and_pause(outcome)?;
-            }
-            app::tui::Action::Open(path) => {
-                std::process::Command::new("/usr/bin/open")
-                    .arg(&path)
-                    .status()?;
-            }
-        }
-    }
+    app::tui::run(&app::tui::RecordOverrides {
+        zoom: cli.zoom,
+        mic: flag(cli.mic, cli.no_mic),
+        webcam: flag(cli.webcam, cli.no_webcam),
+        seconds: cli.seconds,
+        no_render: cli.no_render,
+        no_open: cli.no_open,
+    })
 }
 
-/// Shows the result of a suspended job and waits, so output is not swallowed when the
-/// full-screen app takes the terminal back.
-fn report_and_pause(outcome: Result<()>) -> Result<()> {
-    if let Err(e) = outcome {
-        eprintln!("\n{} {e:#}", "✗".red().bold());
+/// A pair of opposing `--x` / `--no-x` flags as a single override, `None` when neither was
+/// given and the config's own value should stand.
+fn flag(on: bool, off: bool) -> Option<bool> {
+    match (on, off) {
+        (true, _) => Some(true),
+        (_, true) => Some(false),
+        _ => None,
     }
-    print!("\n  {} ", "press enter to return".bright_black());
-    std::io::Write::flush(&mut std::io::stdout()).ok();
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line)?;
-    Ok(())
 }
 
 fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
@@ -265,6 +249,7 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
             println!();
         },
         || app::ui::wait_for_stop(cli.seconds),
+        None,
     )?;
 
     let health = recorder::health(&session)?;
