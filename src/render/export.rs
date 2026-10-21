@@ -6,8 +6,8 @@
 use crate::camera::{self, Crop};
 use crate::capture::clock;
 use crate::capture::frames::FrameRecord;
-use crate::capture::pauses::{Pause, audio_select, is_paused_at};
-use crate::capture::telemetry::Telemetry;
+use crate::capture::pauses::{Pause, audio_select, is_paused_at, recorded_time};
+use crate::capture::telemetry::{EventKind, Telemetry};
 use crate::config::Config;
 use crate::pip::{self, Corner};
 use crate::render::Chrome;
@@ -132,7 +132,31 @@ pub fn run_with(
         .get("pauses")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let kept_frames = times.iter().filter(|&&t| !is_paused_at(&pauses, t)).count();
+
+    // The camera runs on recorded time, so a pause neither ends a click zoom early nor
+    // lets the follow drift: the frame after a resume continues from the one before it.
+    let times: Vec<u64> = times
+        .into_iter()
+        .filter_map(|t| recorded_time(&pauses, t))
+        .collect();
+    tel.events = tel
+        .events
+        .into_iter()
+        .filter_map(|mut e| {
+            e.t_ns = match recorded_time(&pauses, e.t_ns) {
+                Some(t) => t,
+                // A click while paused is not part of the video. Movement still counts:
+                // the poller only logs changes, so dropping it would leave the camera
+                // aimed wherever the cursor was before the pause.
+                None if e.kind == EventKind::Move => pauses
+                    .iter()
+                    .find(|p| p.start_ns <= e.t_ns && e.t_ns < p.end_ns)
+                    .and_then(|p| recorded_time(&pauses, p.end_ns))?,
+                None => return None,
+            };
+            Some(e)
+        })
+        .collect();
 
     // Cursor telemetry is global and in points; the capture may be a window somewhere on
     // screen, recorded at Retina scale. Translate, then scale.
@@ -380,8 +404,8 @@ pub fn run_with(
     let mut out_buf: Vec<u8> = Vec::with_capacity(renderer.out_frame_bytes());
 
     let start = clock::now_nanos();
-    // `decoded` walks the capture's timeline, which the zooms and the webcam follow;
-    // `rendered` counts what survived the pauses into the export.
+    // `decoded` walks the capture's timeline, which the webcam follows; `rendered`
+    // counts what survived the pauses into the export, which the zooms were solved for.
     let mut decoded = 0usize;
     let mut rendered = 0usize;
     // Set when the encoder ends the render early (see the `BrokenPipe` case below): the
@@ -398,11 +422,6 @@ pub fn run_with(
         }
 
         // Hold the last solved zoom if ffmpeg emits more frames than we solved for.
-        let win = *zooms
-            .get(decoded)
-            .or_else(|| zooms.last())
-            .ok_or_else(|| anyhow!("camera produced no crops"))?;
-
         let cam_frame = if let Some(w) = webcam_setup.as_mut() {
             if decoded < cam_start_at || cam_ended {
                 None
@@ -427,6 +446,12 @@ pub fn run_with(
             continue;
         }
 
+        // Hold the last solved zoom if ffmpeg emits more frames than we solved for.
+        let win = *zooms
+            .get(rendered)
+            .or_else(|| zooms.last())
+            .ok_or_else(|| anyhow!("camera produced no crops"))?;
+
         renderer.render(&src_buf, win, cam_frame, &mut out_buf)?;
         match enc_in.write_all(&out_buf) {
             Ok(()) => {}
@@ -444,7 +469,7 @@ pub fn run_with(
         }
         rendered += 1;
         if let Some(cb) = progress {
-            cb(rendered, kept_frames);
+            cb(rendered, zooms.len());
         }
     }
 

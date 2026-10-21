@@ -71,6 +71,23 @@ pub fn is_paused_at(pauses: &[Pause], t_ns: u64) -> bool {
     pauses.iter().any(|p| p.start_ns <= t_ns && t_ns < p.end_ns)
 }
 
+/// Maps a capture time onto the recorded timeline — the one with the pauses taken out —
+/// or None when `t_ns` falls inside a pause.
+///
+/// Anything timed in seconds of video, like how long a click zoom holds, has to run on
+/// this timeline; on the capture's own, a pause would quietly use the time up.
+pub fn recorded_time(pauses: &[Pause], t_ns: u64) -> Option<u64> {
+    if is_paused_at(pauses, t_ns) {
+        return None;
+    }
+    let paused_before: u64 = pauses
+        .iter()
+        .filter(|p| p.end_ns <= t_ns)
+        .map(|p| p.end_ns - p.start_ns)
+        .sum();
+    Some(t_ns - paused_before)
+}
+
 /// An ffmpeg `aselect` expression that drops the paused spans of an audio stream whose
 /// t=0 sits at `base_ns`, or None when nothing needs cutting.
 pub fn audio_select(pauses: &[Pause], base_ns: u64) -> Option<String> {
@@ -100,6 +117,67 @@ mod tests {
         assert!(is_paused_at(&pauses, 100));
         assert!(is_paused_at(&pauses, 199));
         assert!(!is_paused_at(&pauses, 200));
+    }
+
+    #[test]
+    fn recorded_time_closes_up_the_pauses_before_it() {
+        let pauses = [
+            Pause {
+                start_ns: 100,
+                end_ns: 200,
+            },
+            Pause {
+                start_ns: 300,
+                end_ns: 350,
+            },
+        ];
+        assert_eq!(recorded_time(&pauses, 50), Some(50));
+        assert_eq!(recorded_time(&pauses, 150), None);
+        // Resuming picks up exactly where the pause began.
+        assert_eq!(recorded_time(&pauses, 200), Some(100));
+        assert_eq!(recorded_time(&pauses, 400), Some(250));
+    }
+
+    #[test]
+    fn a_click_zoom_holds_across_a_pause() {
+        use crate::camera::{CameraConfig, Crop, solve};
+        use crate::capture::telemetry::{EventKind, Telemetry, TelemetryEvent};
+
+        let s = 1_000_000_000u64;
+        // Click at 1s, pause 1.2s..21.2s, resume. Without the remap the 1.3s hold
+        // expires during the pause and the first frame back is zoomed out.
+        let pauses = [Pause {
+            start_ns: 1_200_000_000,
+            end_ns: 21_200_000_000,
+        }];
+        let event = |t_ns, kind| TelemetryEvent {
+            t_ns,
+            kind,
+            x: 500.0,
+            y: 500.0,
+        };
+        let tel = Telemetry {
+            events: [
+                event(0, EventKind::Move),
+                event(s, EventKind::Down),
+                event(s + 50_000_000, EventKind::Up),
+            ]
+            .into_iter()
+            .filter_map(|e| recorded_time(&pauses, e.t_ns).map(|t_ns| TelemetryEvent { t_ns, ..e }))
+            .collect(),
+            tap_installed: true,
+        };
+        let times: Vec<u64> = (0..1400u64)
+            .map(|i| i * s / 60)
+            .filter_map(|t| recorded_time(&pauses, t))
+            .collect();
+        let crops: Vec<Crop> = solve(&tel, &times, 1000.0, 1000.0, &CameraConfig::default());
+
+        // Last frame before the pause, and first frame after it.
+        let before = times.iter().rposition(|&t| t < 1_200_000_000).unwrap();
+        let zoom = |c: &Crop| 1000.0 / c.w;
+        assert!(zoom(&crops[before]) > 1.0);
+        assert!((zoom(&crops[before + 1]) - zoom(&crops[before])).abs() < 0.05);
     }
 
     #[test]
