@@ -8,6 +8,7 @@
 pub mod clock;
 pub mod devices;
 pub mod frames;
+pub mod pauses;
 pub mod recorder;
 pub mod telemetry;
 pub mod webcam;

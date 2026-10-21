@@ -1,0 +1,211 @@
+//! Pausing a recording.
+//!
+//! ScreenCaptureKit's recording output cannot be paused, and stopping and restarting it
+//! would leave several files to stitch back together. So capture never actually stops:
+//! the pauses are logged on the shared mach timebase and the render cuts them out of the
+//! screen, the webcam and the voice over alike. The raw capture still holds what happened
+//! while paused, the same way it still holds the browser chrome the render removes.
+
+use crate::capture::clock;
+use serde::{Deserialize, Serialize};
+
+/// One paused span, in mach nanoseconds — the same timebase as frame display times.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pause {
+    pub start_ns: u64,
+    pub end_ns: u64,
+}
+
+/// The pauses taken during one recording, handed to the caller's `stop` callback.
+#[derive(Debug, Default)]
+pub struct PauseLog {
+    done: Vec<Pause>,
+    open: Option<u64>,
+}
+
+impl PauseLog {
+    pub fn is_paused(&self) -> bool {
+        self.open.is_some()
+    }
+
+    /// Pauses if running, resumes if paused. Returns whether it is now paused.
+    pub fn toggle(&mut self) -> bool {
+        let now = clock::now_nanos();
+        match self.open.take() {
+            Some(start_ns) => {
+                self.done.push(Pause {
+                    start_ns,
+                    end_ns: now,
+                });
+                false
+            }
+            None => {
+                self.open = Some(now);
+                true
+            }
+        }
+    }
+
+    /// Total time spent paused so far, including a pause still in progress.
+    pub fn paused_ns(&self) -> u64 {
+        let closed: u64 = self.done.iter().map(|p| p.end_ns - p.start_ns).sum();
+        closed
+            + self
+                .open
+                .map_or(0, |s| clock::now_nanos().saturating_sub(s))
+    }
+
+    /// Every pause, closing one still open at `end_ns` — stopping while paused means the
+    /// tail is not wanted either.
+    pub fn finish(self, end_ns: u64) -> Vec<Pause> {
+        let mut pauses = self.done;
+        if let Some(start_ns) = self.open {
+            pauses.push(Pause { start_ns, end_ns });
+        }
+        pauses
+    }
+}
+
+/// True when `t_ns` falls inside any of `pauses`.
+pub fn is_paused_at(pauses: &[Pause], t_ns: u64) -> bool {
+    pauses.iter().any(|p| p.start_ns <= t_ns && t_ns < p.end_ns)
+}
+
+/// Maps a capture time onto the recorded timeline — the one with the pauses taken out —
+/// or None when `t_ns` falls inside a pause.
+///
+/// Anything timed in seconds of video, like how long a click zoom holds, has to run on
+/// this timeline; on the capture's own, a pause would quietly use the time up.
+pub fn recorded_time(pauses: &[Pause], t_ns: u64) -> Option<u64> {
+    if is_paused_at(pauses, t_ns) {
+        return None;
+    }
+    let paused_before: u64 = pauses
+        .iter()
+        .filter(|p| p.end_ns <= t_ns)
+        .map(|p| p.end_ns - p.start_ns)
+        .sum();
+    Some(t_ns - paused_before)
+}
+
+/// An ffmpeg `aselect` expression that drops the paused spans of an audio stream whose
+/// t=0 sits at `base_ns`, or None when nothing needs cutting.
+pub fn audio_select(pauses: &[Pause], base_ns: u64) -> Option<String> {
+    let secs = |ns: u64| ns.saturating_sub(base_ns) as f64 / 1e9;
+    let spans: Vec<String> = pauses
+        .iter()
+        .filter(|p| p.end_ns > base_ns)
+        .map(|p| format!("between(t,{:.6},{:.6})", secs(p.start_ns), secs(p.end_ns)))
+        .collect();
+    (!spans.is_empty()).then(|| {
+        // asetpts closes the gaps aselect leaves, or the encoder pads them with silence.
+        format!("aselect='not({})',asetpts=N/SR/TB", spans.join("+"))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_inside_a_pause_is_cut_and_its_edges_are_half_open() {
+        let pauses = [Pause {
+            start_ns: 100,
+            end_ns: 200,
+        }];
+        assert!(!is_paused_at(&pauses, 99));
+        assert!(is_paused_at(&pauses, 100));
+        assert!(is_paused_at(&pauses, 199));
+        assert!(!is_paused_at(&pauses, 200));
+    }
+
+    #[test]
+    fn recorded_time_closes_up_the_pauses_before_it() {
+        let pauses = [
+            Pause {
+                start_ns: 100,
+                end_ns: 200,
+            },
+            Pause {
+                start_ns: 300,
+                end_ns: 350,
+            },
+        ];
+        assert_eq!(recorded_time(&pauses, 50), Some(50));
+        assert_eq!(recorded_time(&pauses, 150), None);
+        // Resuming picks up exactly where the pause began.
+        assert_eq!(recorded_time(&pauses, 200), Some(100));
+        assert_eq!(recorded_time(&pauses, 400), Some(250));
+    }
+
+    #[test]
+    fn a_click_zoom_holds_across_a_pause() {
+        use crate::camera::{CameraConfig, Crop, solve};
+        use crate::capture::telemetry::{EventKind, Telemetry, TelemetryEvent};
+
+        let s = 1_000_000_000u64;
+        // Click at 1s, pause 1.2s..21.2s, resume. Without the remap the 1.3s hold
+        // expires during the pause and the first frame back is zoomed out.
+        let pauses = [Pause {
+            start_ns: 1_200_000_000,
+            end_ns: 21_200_000_000,
+        }];
+        let event = |t_ns, kind| TelemetryEvent {
+            t_ns,
+            kind,
+            x: 500.0,
+            y: 500.0,
+        };
+        let tel = Telemetry {
+            events: [
+                event(0, EventKind::Move),
+                event(s, EventKind::Down),
+                event(s + 50_000_000, EventKind::Up),
+            ]
+            .into_iter()
+            .filter_map(|e| recorded_time(&pauses, e.t_ns).map(|t_ns| TelemetryEvent { t_ns, ..e }))
+            .collect(),
+            tap_installed: true,
+        };
+        let times: Vec<u64> = (0..1400u64)
+            .map(|i| i * s / 60)
+            .filter_map(|t| recorded_time(&pauses, t))
+            .collect();
+        let crops: Vec<Crop> = solve(&tel, &times, 1000.0, 1000.0, &CameraConfig::default());
+
+        // Last frame before the pause, and first frame after it.
+        let before = times.iter().rposition(|&t| t < 1_200_000_000).unwrap();
+        let zoom = |c: &Crop| 1000.0 / c.w;
+        assert!(zoom(&crops[before]) > 1.0);
+        assert!((zoom(&crops[before + 1]) - zoom(&crops[before])).abs() < 0.05);
+    }
+
+    #[test]
+    fn stopping_while_paused_closes_the_pause_at_the_stop() {
+        let log = PauseLog {
+            done: vec![],
+            open: Some(500),
+        };
+        assert_eq!(
+            log.finish(900),
+            vec![Pause {
+                start_ns: 500,
+                end_ns: 900
+            }]
+        );
+    }
+
+    #[test]
+    fn audio_cuts_are_relative_to_the_first_frame() {
+        let base = 10_000_000_000;
+        let pauses = [Pause {
+            start_ns: base + 2_000_000_000,
+            end_ns: base + 3_500_000_000,
+        }];
+        assert_eq!(
+            audio_select(&pauses, base).as_deref(),
+            Some("aselect='not(between(t,2.000000,3.500000))',asetpts=N/SR/TB")
+        );
+        assert_eq!(audio_select(&[], base), None);
+    }
+}
