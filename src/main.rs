@@ -248,7 +248,7 @@ fn cmd_record(cli: &Cli, target: Target) -> Result<()> {
             }
             println!();
         },
-        || app::ui::wait_for_stop(cli.seconds),
+        |_| app::ui::wait_for_stop(cli.seconds),
         None,
     )?;
 

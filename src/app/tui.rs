@@ -135,6 +135,16 @@ struct Recording {
     /// into, paired with the webcam settings this recording is actually using.
     preview: Option<(PreviewSink, config::WebcamSettings)>,
     stopping: bool,
+    /// Mirrored from the recorder's pause log each tick, for drawing.
+    paused: bool,
+    paused_for: Duration,
+}
+
+impl Recording {
+    /// Time that will make it into the render — wall time less the paused spans.
+    fn recorded(&self) -> Duration {
+        self.started.elapsed().saturating_sub(self.paused_for)
+    }
 }
 
 struct Windows {
@@ -587,6 +597,8 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
         label: Rc::clone(&label),
         preview,
         stopping: false,
+        paused: false,
+        paused_for: Duration::ZERO,
     });
     app.status = "recording…".into();
 
@@ -611,14 +623,22 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
             }
             *label.borrow_mut() = Some(parts.join(" · "));
         },
-        || {
+        |pauses| {
             let started = Instant::now();
             loop {
+                if let Some(rec) = app.recording.as_mut() {
+                    rec.paused = pauses.is_paused();
+                    rec.paused_for = Duration::from_nanos(pauses.paused_ns());
+                }
                 if let Err(e) = terminal.draw(|f| draw(f, app)) {
                     draw_error = Some(e);
                     return;
                 }
-                if seconds.is_some_and(|s| started.elapsed().as_secs() >= s) {
+                // `--seconds` counts what ends up in the video, so a pause extends it.
+                let recorded = started
+                    .elapsed()
+                    .saturating_sub(Duration::from_nanos(pauses.paused_ns()));
+                if seconds.is_some_and(|s| recorded.as_secs() >= s) {
                     return;
                 }
                 match event::poll(Duration::from_millis(100)) {
@@ -642,6 +662,14 @@ fn run_record(terminal: &mut Tui, app: &mut App, target: Target) -> Result<bool>
                         quit = true;
                     }
                     (KeyCode::Enter, _) | (KeyCode::Char('s'), _) => {}
+                    (KeyCode::Char('p'), _) | (KeyCode::Char(' '), _) => {
+                        app.status = if pauses.toggle() {
+                            "paused".into()
+                        } else {
+                            "recording…".into()
+                        };
+                        continue;
+                    }
                     _ => continue,
                 }
                 // Either way the capture ends here; the teardown below still runs, so the
@@ -1162,10 +1190,14 @@ fn draw_tabs(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(rec) = &app.recording {
         // ~1s on/off — a pulse fast enough to read as "live" without being distracting.
         let lit = (rec.started.elapsed().as_millis() / 500) % 2 == 0;
-        spans.push(Span::styled(
-            "●",
-            Style::default().fg(if lit { Color::Red } else { Color::DarkGray }),
-        ));
+        spans.push(if rec.paused {
+            Span::styled("❚❚", Style::default().fg(Color::Yellow))
+        } else {
+            Span::styled(
+                "●",
+                Style::default().fg(if lit { Color::Red } else { Color::DarkGray }),
+            )
+        });
     }
     frame.render_widget(
         Paragraph::new(Line::from(spans)).block(Block::default().borders(Borders::BOTTOM)),
@@ -1466,14 +1498,22 @@ fn draw_recording(frame: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let elapsed = rec.started.elapsed();
+    let elapsed = rec.recorded();
     let mut lines = vec![Line::from(vec![
-        Span::styled("● ", Style::default().fg(Color::Red)),
+        if rec.paused {
+            Span::styled("❚❚ ", Style::default().fg(Color::Yellow))
+        } else {
+            Span::styled("● ", Style::default().fg(Color::Red))
+        },
         Span::raw(format!(
             "{:>02}:{:02}",
             elapsed.as_secs() / 60,
             elapsed.as_secs() % 60
         )),
+        Span::styled(
+            if rec.paused { "  paused" } else { "" },
+            Style::default().fg(Color::Yellow),
+        ),
     ])];
     if let Some(label) = rec.label.borrow().as_ref() {
         lines.push(Line::from(Span::styled(
@@ -1485,7 +1525,7 @@ fn draw_recording(frame: &mut Frame, area: Rect, app: &App) {
         if rec.stopping {
             "stopping — finishing the file"
         } else {
-            "enter/s stop · q stop and quit"
+            "p/space pause · enter/s stop · q stop and quit"
         },
         Style::default().fg(Color::DarkGray),
     )));

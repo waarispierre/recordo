@@ -184,6 +184,9 @@ fn scale_for(content: &SCShareableContent, window: &Option<SCWindow>) -> Result<
 
 /// Records until `stop` returns, writing the capture and its sidecars into `session`.
 ///
+/// `stop` is handed the recording's [`PauseLog`](crate::capture::pauses::PauseLog);
+/// whatever it toggles is cut from the render, not from the capture itself.
+///
 /// `preview`, when given, receives a small downsampled frame every so often while the
 /// webcam is recording, for a caller that wants to show a live thumbnail (the TUI's
 /// corner picture-in-picture) without opening a second capture session on the same
@@ -194,7 +197,7 @@ pub fn record(
     config: &Config,
     chooser: impl FnOnce(&[SCWindow]) -> Result<Option<SCWindow>>,
     on_start: impl FnOnce(&Plan),
-    stop: impl FnOnce(),
+    stop: impl FnOnce(&mut crate::capture::pauses::PauseLog),
     preview: Option<crate::capture::webcam::PreviewSink>,
 ) -> Result<()> {
     let content = SCShareableContent::get().context("grant Screen Recording permission")?;
@@ -323,7 +326,9 @@ pub fn record(
     let tel = telemetry::TelemetryRecorder::start();
     stream.start_capture().context("failed to start capture")?;
     on_start(&plan);
-    stop();
+    let mut pause_log = crate::capture::pauses::PauseLog::default();
+    stop(&mut pause_log);
+    let pauses = pause_log.finish(crate::capture::clock::now_nanos());
     stream.stop_capture().context("failed to stop capture")?;
 
     let telemetry = tel.stop();
@@ -369,6 +374,8 @@ pub fn record(
             })),
             "microphone": plan.microphone,
             "webcam": plan.webcam,
+            // Mach-ns spans the render cuts out; see `capture::pauses`.
+            "pauses": pauses,
         }))?,
     )?;
 
