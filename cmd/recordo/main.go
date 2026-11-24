@@ -1,108 +1,160 @@
 // Command recordo records demos with a cursor-following camera.
-//
-// During the Go rewrite this binary only carries the subcommands ported so far; the Rust
-// build is still the complete tool. See docs/proposals/go-rewrite.md.
 package main
 
 import (
-	"flag"
+	"context"
 	"fmt"
 	"os"
-	"path/filepath"
+
+	"charm.land/fang/v2"
+	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/render"
+	"github.com/waarispierre/recordo/internal/config"
 	"github.com/waarispierre/recordo/internal/session"
 )
 
+// version is set at build time with -ldflags "-X main.version=…".
+var version = "dev"
+
+// flags are the global options, shared by every subcommand as in the Rust CLI.
+type flags struct {
+	app      string
+	window   uint32
+	display  bool
+	seconds  uint
+	zoom     float64
+	noRender bool
+	noOpen   bool
+	mic      bool
+	noMic    bool
+	webcam   bool
+	noWebcam bool
+}
+
+var opt flags
+
+// zoomOverride is --zoom when it was given.
+func zoomOverride(cmd *cobra.Command) *float64 {
+	if cmd.Flags().Changed("zoom") {
+		z := opt.zoom
+		return &z
+	}
+	return nil
+}
+
+// override folds an opposing --x / --no-x pair into one, nil when neither was given.
+func override(on, off bool) *bool {
+	switch {
+	case on:
+		t := true
+		return &t
+	case off:
+		f := false
+		return &f
+	}
+	return nil
+}
+
+func target() capture.Target {
+	switch {
+	case opt.display:
+		return capture.Target{Kind: capture.TargetDisplay}
+	case opt.window != 0:
+		return capture.Target{Kind: capture.TargetWindow, WindowID: opt.window}
+	case opt.app != "":
+		return capture.Target{Kind: capture.TargetApp, App: opt.app}
+	}
+	return capture.Target{Kind: capture.TargetAsk}
+}
+
+func rootCommand() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "recordo",
+		Short: "Screen recordings with a cursor-following camera",
+		Long: "Records an app window or the whole display, then re-renders it with a smooth " +
+			"auto-zoom that follows your cursor, rounded corners, a drop shadow and a styled background.",
+		Args:          cobra.NoArgs,
+		SilenceUsage:  true,
+		SilenceErrors: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A bare `recordo` opens the full-screen app, like lazygit. Any targeting flag
+			// means the one-shot path, and a non-terminal always does.
+			if opt.app == "" && opt.window == 0 && !opt.display && term.IsTerminal(int(os.Stdin.Fd())) {
+				return runTUI(cmd)
+			}
+			return cmdRecord(cmd)
+		},
+	}
+	p := root.PersistentFlags()
+	p.StringVarP(&opt.app, "app", "a", "", "record this app (matched on name, largest visible window wins)")
+	p.Uint32VarP(&opt.window, "window", "w", 0, "record this window id (see `recordo windows`)")
+	p.BoolVarP(&opt.display, "display", "d", false, "record the whole display")
+	p.UintVarP(&opt.seconds, "seconds", "s", 0, "stop after this many seconds instead of waiting for Enter")
+	p.Float64VarP(&opt.zoom, "zoom", "z", 0, "zoom percentage for this run only, e.g. 30 (overrides config)")
+	p.BoolVar(&opt.noRender, "no-render", false, "record but do not render")
+	p.BoolVar(&opt.noOpen, "no-open", false, "do not open the finished video")
+	p.BoolVar(&opt.mic, "mic", false, "record voice over for this run only (overrides config)")
+	p.BoolVar(&opt.noMic, "no-mic", false, "skip voice over for this run only (overrides config)")
+	p.BoolVar(&opt.webcam, "webcam", false, "show the webcam overlay for this run only (overrides config)")
+	p.BoolVar(&opt.noWebcam, "no-webcam", false, "skip the webcam overlay for this run only (overrides config)")
+	root.MarkFlagsMutuallyExclusive("mic", "no-mic")
+	root.MarkFlagsMutuallyExclusive("webcam", "no-webcam")
+
+	root.AddCommand(
+		&cobra.Command{
+			Use: "record", Short: "Record and render (the default)", Args: cobra.NoArgs,
+			RunE: func(cmd *cobra.Command, _ []string) error { return cmdRecord(cmd) },
+		},
+		renderCommand(),
+		compressCommand(),
+		&cobra.Command{
+			Use: "windows", Short: "List windows that can be recorded", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return cmdWindows() },
+		},
+		&cobra.Command{
+			Use: "devices", Short: "List cameras and microphones, and the names the config accepts", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return cmdDevices() },
+		},
+		doctorCommand(),
+		configCommand(),
+		&cobra.Command{
+			Use: "list", Short: "List past recordings", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return cmdList() },
+		},
+		pruneCommand(),
+	)
+	return root
+}
+
 func main() {
-	// The main thread belongs to macOS's run loop; the program runs on a goroutine.
+	// The main thread belongs to macOS's run loop, which the webcam needs; the program
+	// runs on a goroutine. See capture.Main.
 	capture.Main(func() int {
-		if err := run(os.Args[1:]); err != nil {
-			fmt.Fprintf(os.Stderr, "\n  error: %v\n\n", err)
+		// No signal option: Ctrl-C while recording must end the recording cleanly, which
+		// the record command handles itself.
+		if err := fang.Execute(context.Background(), rootCommand(), fang.WithVersion(version)); err != nil {
 			return 1
 		}
 		return 0
 	})
 }
 
-const usage = `usage:
-  recordo render [-zoom N] [-o FILE] [-webcam | -no-webcam] [SESSION_DIR]
-  recordo record [-a APP | -w ID | -display] [-s SECONDS]
-  recordo windows
-  recordo devices
-  recordo doctor [-verbose]`
-
-func run(args []string) error {
-	if len(args) == 0 {
-		return fmt.Errorf("%s", usage)
+// loadConfig reads the config file, writing a commented default on first run.
+func loadConfig() (config.Config, string, error) {
+	path, err := configPath()
+	if err != nil {
+		return config.Config{}, "", err
 	}
-	switch args[0] {
-	case "render":
-		return cmdRender(args[1:])
-	case "record":
-		return cmdRecord(args[1:])
-	case "windows":
-		return cmdWindows()
-	case "devices":
-		return cmdDevices()
-	case "doctor":
-		fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
-		verbose := fs.Bool("verbose", false, "per-browser page-bounds detail")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		return cmdDoctor(*verbose)
-	}
-	return fmt.Errorf("%s", usage)
+	cfg, err := config.LoadOrCreate(path)
+	return cfg, path, err
 }
 
-func cmdRender(args []string) error {
-	fs := flag.NewFlagSet("render", flag.ContinueOnError)
-	zoom := fs.Float64("zoom", -1, "zoom percent for this render only")
-	out := fs.String("o", "", "output file (default: export.mp4 in the session)")
-	webcam := fs.Bool("webcam", false, "composite the webcam for this render only (overrides config)")
-	noWebcam := fs.Bool("no-webcam", false, "leave the webcam out for this render only (overrides config)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	var s *session.Session
-	var err error
-	if p := fs.Arg(0); p != "" {
-		s, err = session.Open(p)
-	} else {
-		s, err = session.Latest()
-	}
+func configPath() (string, error) {
+	p, err := session.ConfigPath()
 	if err != nil {
-		return err
+		return "", fmt.Errorf("locate config: %w", err)
 	}
-	dst := s.Export()
-	if *out != "" {
-		if dst, err = filepath.Abs(*out); err != nil {
-			return err
-		}
-	}
-
-	opts := render.Options{Progress: func(done, total int) {
-		if done%30 == 0 || done == total {
-			fmt.Printf("\r  rendering %d/%d", done, total)
-		}
-	}}
-	if *zoom >= 0 {
-		opts.ZoomPercent = zoom
-	}
-	if *webcam || *noWebcam {
-		on := *webcam
-		opts.Webcam = &on
-	}
-	fmt.Printf("  rendering %s\n", s.Dir)
-	rep, err := render.Run(s.Capture(), dst, opts)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("\n  %d frames, %dx%d, %.1fs video in %.1fs (%.2fx realtime, %.0f fps)\n  -> %s\n",
-		rep.Frames, rep.OutW, rep.OutH, rep.VideoSeconds, rep.RenderSeconds,
-		rep.RealtimeRatio(), rep.FPS(), dst)
-	return nil
+	return p, nil
 }

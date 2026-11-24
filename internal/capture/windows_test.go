@@ -44,6 +44,21 @@ func TestParkedWindowsAreNotOffered(t *testing.T) {
 	}
 }
 
+func TestAWindowOverhangingTheEdgeIsStillOffered(t *testing.T) {
+	c := &Content{
+		Displays: []Display{{ID: 1, Width: 1512, Height: 982, Frame: Rect{0, 0, 1512, 982}}},
+		Windows: []Window{
+			{ID: 1, OnScreen: true, AppName: "Safari", BundleID: "com.apple.Safari", Frame: Rect{20, 40, 1500, 960}},
+		},
+	}
+	if len(c.Recordable()) != 1 {
+		t.Fatal("a window a few points past the edge is visible and should be offered")
+	}
+	if _, ok := displayFor(c.Displays, c.Windows[0].Frame); ok {
+		t.Fatal("but it is not wholly on the display, so recording it needs a clear error")
+	}
+}
+
 func TestLargestForAppMatchesBySubstring(t *testing.T) {
 	ws := []Window{
 		win(1, "Google Chrome", "com.google.Chrome", 800, 600),

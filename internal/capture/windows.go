@@ -55,18 +55,29 @@ func (w Window) Label() string {
 	return fmt.Sprintf("%s%s (%dx%d)", app, title, int(w.Frame.W), int(w.Frame.H))
 }
 
-// Visible keeps the windows that sit wholly on one of the displays. Windows macOS has
-// moved out of view — on another Space, stashed by Stage Manager, or left behind by a
-// disconnected monitor — report a frame parked past the screen edge, and recording one
-// can only produce black, so they are never offered.
+// Visible keeps the windows whose centre is on a display. Windows macOS has moved out of
+// view — on another Space, stashed by Stage Manager, or left behind by a disconnected
+// monitor — are parked past the screen edge with their centre far off it, so they are
+// never offered. A window that merely overhangs an edge is still visible, and is offered;
+// MakePlan explains why it cannot be recorded as it is.
 func Visible(windows []Window, displays []Display) []Window {
 	var out []Window
 	for _, w := range windows {
-		if _, ok := displayFor(displays, w.Frame); ok {
+		if _, ok := displayAt(displays, w.Frame.X+w.Frame.W/2, w.Frame.Y+w.Frame.H/2); ok {
 			out = append(out, w)
 		}
 	}
 	return out
+}
+
+// displayAt is the display containing a point.
+func displayAt(displays []Display, x, y float64) (Display, bool) {
+	for _, d := range displays {
+		if x >= d.Frame.X && y >= d.Frame.Y && x < d.Frame.X+d.Frame.W && y < d.Frame.Y+d.Frame.H {
+			return d, true
+		}
+	}
+	return Display{}, false
 }
 
 // Recordable is the windows worth offering: capturable and visible.

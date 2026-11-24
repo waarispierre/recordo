@@ -3,6 +3,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/spf13/cobra"
+
 	"github.com/waarispierre/recordo/internal/capture"
 	"github.com/waarispierre/recordo/internal/config"
 	"github.com/waarispierre/recordo/internal/session"
@@ -16,47 +18,61 @@ func cmdWindows() error {
 	}
 	windows := content.Recordable()
 	if len(windows) == 0 {
-		fmt.Println("  no windows found")
+		say("no windows found")
 		return nil
 	}
-	fmt.Printf("\n  %9s  %s\n", "DISPLAY", "FRAME (points)")
-	for _, d := range content.Displays {
-		fmt.Printf("  %9d  %s\n", d.ID, d.Frame)
-	}
-	fmt.Printf("\n  %9s  %-22s %s\n", "ID", "FRAME (points)", "WINDOW")
+	fmt.Println()
+	say("%9s  %s", bold.Render("ID"), bold.Render("WINDOW"))
 	for _, w := range windows {
-		fmt.Printf("  %9d  %-22s %s\n", w.ID, w.Frame, w.Label())
+		say("%s  %s", cyan.Render(fmt.Sprintf("%9d", w.ID)), w.Label())
 	}
-	fmt.Print("\n  recordo -w <ID>    or    recordo -a <app name>\n\n")
+	fmt.Println()
+	say("%s", dim.Render("recordo -w <ID>    or    recordo -a <app name>"))
+	fmt.Println()
 	return nil
 }
 
 func cmdDevices() error {
 	list := func(title string, ds []capture.Device) {
-		fmt.Printf("\n  %s\n", title)
+		fmt.Println()
+		say("%s", bold.Render(title))
 		if len(ds) == 0 {
-			fmt.Println("  none found")
+			say("none found")
 		}
 		for _, d := range ds {
-			fmt.Printf("  · %s\n", d.Name)
+			say("%s %s", dot, d.Name)
 		}
 	}
 	list("microphones", capture.Microphones())
 	list("cameras", capture.Cameras())
-	fmt.Print("\n  recordo config set audio.device \"<name>\"    or    webcam.device\n\n")
+	fmt.Println()
+	say("%s", dim.Render(`recordo config set audio.device "<name>"    or    webcam.device`))
+	fmt.Println()
 	return nil
 }
 
 func check(name string, ok bool, hint string) {
 	if ok {
-		fmt.Printf("  ✓ %-18s\n", name)
+		say("%s %-18s", tick, name)
 	} else {
-		fmt.Printf("  ✗ %-18s %s\n", name, hint)
+		say("%s %-18s %s", fail, name, dim.Render(hint))
 	}
 }
 
+func doctorCommand() *cobra.Command {
+	var verbose bool
+	cmd := &cobra.Command{
+		Use: "doctor", Short: "Check permissions and tooling", Args: cobra.NoArgs,
+		RunE: func(*cobra.Command, []string) error { return cmdDoctor(verbose) },
+	}
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "also report what page bounds each open browser exposes")
+	return cmd
+}
+
 func cmdDoctor(verbose bool) error {
-	fmt.Print("\n  recordo doctor\n\n")
+	fmt.Println()
+	say("%s", bold.Render("recordo doctor"))
+	fmt.Println()
 	_, err := capture.ShareableContent()
 	check("Screen Recording", err == nil, "required — grant it to your terminal, then restart it")
 	check("Accessibility", capture.AccessibilityTrusted(),
@@ -68,18 +84,18 @@ func cmdDoctor(verbose bool) error {
 		name   string
 		access capture.Access
 	}{{"Microphone", capture.MicrophoneAccess()}, {"Camera", capture.CameraAccess()}} {
-		mark := "·"
+		mark := dim.Render("·")
 		if p.access == capture.Granted {
-			mark = "✓"
+			mark = tick
 		}
-		fmt.Printf("  %s %-18s %s\n", mark, p.name, p.access.Explain())
+		say("%s %-18s %s", mark, p.name, dim.Render(p.access.Explain()))
 	}
 
 	// Report the absolute binary that will actually run, not merely "something named
 	// ffmpeg is on $PATH".
 	for _, name := range []string{"ffmpeg", "ffprobe"} {
 		if p, ok := tools.Find(name); ok {
-			fmt.Printf("  ✓ %-18s %s\n", name, p)
+			say("%s %-18s %s", tick, name, dim.Render(p))
 		} else {
 			check(name, false, "required to render — brew install ffmpeg")
 		}
@@ -93,11 +109,13 @@ func cmdDoctor(verbose bool) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("\n  config %s\n  videos %s\n", cfg, videos)
+	fmt.Println()
+	say("%s %s", dim.Render("config"), cfg)
+	say("%s %s", dim.Render("videos"), videos)
 	if verbose {
 		return browserReport()
 	}
-	fmt.Println("  --verbose adds per-browser detail")
+	say("%s", dim.Render("--verbose adds per-browser detail"))
 	fmt.Println()
 	return nil
 }
@@ -105,7 +123,8 @@ func cmdDoctor(verbose bool) error {
 // browserReport shows what page bounds each open browser reports, which is what decides
 // whether a recording is cropped exactly or by the fixed fallback.
 func browserReport() error {
-	fmt.Print("\n  browsers\n")
+	fmt.Println()
+	say("%s", bold.Render("browsers"))
 	content, err := capture.ShareableContent()
 	if err != nil {
 		return err
@@ -116,15 +135,14 @@ func browserReport() error {
 			continue
 		}
 		found = true
-		fmt.Printf("  · %-16s", w.AppName)
 		if r, ok := capture.WebContentRect(w.PID, w.Frame); ok {
-			fmt.Printf("page %.0fx%.0f, chrome %.0fpt exact\n", r.W, r.H, r.Y-w.Frame.Y)
+			say("%s %-16spage %.0fx%.0f, chrome %.0fpt %s", dot, w.AppName, r.W, r.H, r.Y-w.Frame.Y, green.Render("exact"))
 		} else {
-			fmt.Println("page bounds unavailable — will use the fixed crop")
+			say("%s %-16s%s", dot, w.AppName, yellow.Render("page bounds unavailable — will use the fixed crop"))
 		}
 	}
 	if !found {
-		fmt.Println("  · no browser windows open")
+		say("%s no browser windows open", dot)
 	}
 	fmt.Println()
 	return nil

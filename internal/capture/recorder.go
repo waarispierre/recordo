@@ -92,10 +92,11 @@ func MakePlan(target Target, choose Chooser) (*Plan, error) {
 		if !ok {
 			// Distinguish "no such app" from "its windows are all out of view".
 			if hidden, any := LargestForApp(Capturable(content.Windows), target.App); any {
-				w = hidden
-			} else {
-				return nil, fmt.Errorf("no window found for %q — try `recordo windows`", target.App)
+				return nil, fmt.Errorf("%s has no window on screen — its windows are on another Space, "+
+					"hidden by Stage Manager, or minimised. Bring one onto the screen, or record the whole display",
+					hidden.AppName)
 			}
+			return nil, fmt.Errorf("no window found for %q — try `recordo windows`", target.App)
 		}
 		window = &w
 	case TargetWindow:
@@ -114,13 +115,15 @@ func MakePlan(target Target, choose Chooser) (*Plan, error) {
 		// screens, the window is often on the other.
 		d, ok := displayFor(content.Displays, window.Frame)
 		if !ok {
-			var ds []string
-			for _, d := range content.Displays {
-				ds = append(ds, d.Frame.String())
+			// The capture is cropped from one display, so a window running past its edge
+			// would come out cut off, with black where the rest should be.
+			f := window.Frame
+			if _, visible := displayAt(content.Displays, f.X+f.W/2, f.Y+f.H/2); visible {
+				return nil, fmt.Errorf("%s runs past the edge of the screen (%s). "+
+					"Move it fully onto one screen, or record the whole display", window.Label(), f)
 			}
-			return nil, fmt.Errorf("that window (%s at %s) is not on any display (%s), so it is on another Space. "+
-				"Switch to it first, or record the whole display",
-				window.Label(), window.Frame, strings.Join(ds, ", "))
+			return nil, fmt.Errorf("%s is not on screen (%s), so it is on another Space or hidden. "+
+				"Switch to it first, or record the whole display", window.Label(), f)
 		}
 		display, label, windowID = d, window.Label(), window.ID
 	} else {
