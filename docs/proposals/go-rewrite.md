@@ -65,6 +65,17 @@ Each phase ends with the Go code checked against the Rust it replaces.
   multiply-adds on arm64; this is unverified and far below what is visible. Not yet
   covered: a recording with a voice-over track.
 
+- **Phase 3, part 1 done.** Window list, devices, doctor, Accessibility page bounds,
+  telemetry (C threads: 120 Hz poller + event tap) and ScreenCaptureKit recording.
+  Checked on 2026-11-24: `doctor` output matches the Rust build; a Go recording
+  (display, 10s, 7 clicks, median cursor gap 62ms) renders with the Rust build. Rust and
+  Go renders of it differ by 69.5 dB average, 47.8 dB worst — not visible, but larger
+  than on the Phase 2 recordings, so worth a crop-level comparison of `camera::solve`
+  against `camera.Solve` (not yet done). Not yet covered: a window or browser target, the
+  Accessibility path (not granted to the terminal), and voice-over.
+- **Phase 3, part 2 (next):** webcam (`AVCaptureMovieFileOutput` + frame log + TUI
+  preview sink).
+
 ## Environment notes
 
 - The Claude Code sandbox hides the GPU (`MTLCreateSystemDefaultDevice` returns nil).

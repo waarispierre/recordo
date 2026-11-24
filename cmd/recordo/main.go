@@ -21,14 +21,42 @@ func main() {
 	}
 }
 
+const usage = `usage:
+  recordo render [-zoom N] [-o FILE] [SESSION_DIR]
+  recordo record [-a APP | -w ID | -display] [-s SECONDS]
+  recordo windows
+  recordo devices
+  recordo doctor [-verbose]`
+
 func run(args []string) error {
-	if len(args) == 0 || args[0] != "render" {
-		return fmt.Errorf("usage: recordo render [-zoom N] [-o FILE] [SESSION_DIR]")
+	if len(args) == 0 {
+		return fmt.Errorf("%s", usage)
 	}
+	switch args[0] {
+	case "render":
+		return cmdRender(args[1:])
+	case "record":
+		return cmdRecord(args[1:])
+	case "windows":
+		return cmdWindows()
+	case "devices":
+		return cmdDevices()
+	case "doctor":
+		fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+		verbose := fs.Bool("verbose", false, "per-browser page-bounds detail")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		return cmdDoctor(*verbose)
+	}
+	return fmt.Errorf("%s", usage)
+}
+
+func cmdRender(args []string) error {
 	fs := flag.NewFlagSet("render", flag.ContinueOnError)
 	zoom := fs.Float64("zoom", -1, "zoom percent for this render only")
 	out := fs.String("o", "", "output file (default: export.mp4 in the session)")
-	if err := fs.Parse(args[1:]); err != nil {
+	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
