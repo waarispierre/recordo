@@ -6,9 +6,9 @@
 #     ./install.sh
 #
 # Deliberately a script rather than a package manager. recordo is early, macOS-only and
-# has one binary; a Homebrew formula added a tap repository to maintain, a release
-# process, and a workaround for SwiftPM's sandbox that traded away a layer of isolation.
-# None of that earns its place yet.
+# has one binary; a Homebrew formula would add a tap repository to maintain and a release
+# process. None of that earns its place yet. With Go set up, `go install` works too — see
+# the README.
 set -euo pipefail
 
 BOLD=$'\e[1m'; DIM=$'\e[90m'; RED=$'\e[31m'; GREEN=$'\e[32m'; YELLOW=$'\e[33m'; OFF=$'\e[0m'
@@ -20,21 +20,22 @@ die()  { printf '\n  %s✗%s %s\n\n' "$RED" "$OFF" "$1" >&2; exit 1; }
 printf '\n  %srecordo%s %sinstaller%s\n\n' "$BOLD" "$OFF" "$DIM" "$OFF"
 
 # --- prerequisites -----------------------------------------------------------------
-# Checked up front and all at once: finding out about a missing dependency four minutes
-# into a compile is a poor way to learn it.
+# Checked up front and all at once: finding out about a missing dependency halfway
+# through a build is a poor way to learn it.
 
 [[ "$(uname -s)" == "Darwin" ]] || die "recordo is macOS-only; this is $(uname -s)."
 
 macos_major=$(sw_vers -productVersion | cut -d. -f1)
-if (( macos_major < 26 )); then
-    die "macOS 26 or later is required to build, found $(sw_vers -productVersion).
+if (( macos_major < 15 )); then
+    die "macOS 15 or later is required, found $(sw_vers -productVersion).
 
-  Not an arbitrary floor: the apple-metal crate's Swift bridge references
-  MTLSamplerReductionMode behind 'if #available(macOS 26.0, *)'. That guard is a runtime
-  check, so the symbols still have to exist in the SDK at compile time."
+  Not an arbitrary floor: recording writes straight to a file through ScreenCaptureKit's
+  SCRecordingOutput, which macOS 15 introduced."
 fi
 ok "macOS $(sw_vers -productVersion)"
 
+# cgo compiles the Objective-C that talks to ScreenCaptureKit and AVFoundation, so a C
+# toolchain and the macOS SDK are needed; the Command Line Tools provide both.
 if ! xcode-select -p >/dev/null 2>&1; then
     die "Xcode Command Line Tools are missing. Install them with:
 
@@ -42,12 +43,15 @@ if ! xcode-select -p >/dev/null 2>&1; then
 fi
 ok "Command Line Tools $(xcode-select -p)"
 
-if ! command -v cargo >/dev/null 2>&1; then
-    die "Rust is not installed. Get it from https://rustup.rs:
+if ! command -v go >/dev/null 2>&1; then
+    die "Go is not installed. Install it with:
 
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+      brew install go
+
+  or from https://go.dev/dl"
 fi
-ok "cargo $(cargo --version | cut -d' ' -f2)"
+# An older Go is fine: it fetches the toolchain go.mod asks for by itself.
+ok "$(go version | cut -d' ' -f3)"
 
 # ffmpeg is a runtime dependency, not a build one, so a missing copy is a warning here
 # and an error later. Saying so now is kinder than a failed first render.
@@ -60,16 +64,21 @@ fi
 
 # --- build -------------------------------------------------------------------------
 
-printf '\n  %sbuilding%s %s(a few minutes; wgpu and naga are large)%s\n\n' \
-    "$BOLD" "$OFF" "$DIM" "$OFF"
-
 cd "$(dirname "$0")"
-cargo install --path . --locked
+version=$(git describe --tags --always --dirty 2>/dev/null || echo dev)
+bin_dir=$(go env GOBIN)
+[[ -n "$bin_dir" ]] || bin_dir="$(go env GOPATH)/bin"
+mkdir -p "$bin_dir"
+
+printf '\n  %sbuilding%s %s%s (the first build fetches dependencies)%s\n\n' \
+    "$BOLD" "$OFF" "$DIM" "$version" "$OFF"
+
+CGO_ENABLED=1 go build -trimpath \
+    -ldflags "-s -w -X github.com/waarispierre/recordo/internal/cli.Version=$version" \
+    -o "$bin_dir/recordo" ./cmd/recordo
 
 # --- report ------------------------------------------------------------------------
 
-bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
-printf '\n'
 ok "installed to $bin_dir/recordo"
 
 case ":$PATH:" in
@@ -85,7 +94,7 @@ cat <<EOF
 
   ${BOLD}next${OFF}
     recordo doctor    ${DIM}check macOS permissions${OFF}
-    recordo           ${DIM}record something${OFF}
+    recordo           ${DIM}open the app and record something${OFF}
 
   recordo needs Screen Recording permission, granted to the terminal you run it
   from. ${DIM}doctor${OFF} shows what is missing.

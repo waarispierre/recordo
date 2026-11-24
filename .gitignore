@@ -1,4 +1,5 @@
-target/
+# Built binary (go build -o bin/recordo ./cmd/recordo).
+bin/
 
 # Recordings and their sidecars are of your screen. Never commit them.
 out/

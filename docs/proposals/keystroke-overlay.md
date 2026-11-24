@@ -58,30 +58,27 @@ quietly becomes conditional is worse than one that was never made.
 
 ## Design
 
-Three separable pieces, in the grain of the existing architecture — OS access, pure
-model, rendering.
-
 Three separable pieces, in the grain of the existing architecture — OS access, pure model,
-rendering.
+rendering — all inside the record and render slices.
 
-**1. Capture — `telemetry.rs` + new `keycode.rs`**
+**1. Capture — `platform/macos/telemetry.m` + new `domain/keys/keycode.go`**
 
-- Add `EventKind::Key`; add `key: Option<String>` to `TelemetryEvent`, marked
-  `#[serde(default)]` so existing sidecars without the field still parse.
-- `TelemetryRecorder::start(capture_keys: bool)`. When true, add `CGEventType::KeyDown` and
-  `FlagsChanged` to the tap's event mask. When false the mask is exactly what it is today,
-  so the current behaviour is bit-for-bit unchanged.
-- `keycode.rs` maps virtual keycode + modifier flags → a display label: `⌘C`, `⏎`, `⇥`,
+- Add `telemetry.Key` to `EventKind`; add `Key string` to `telemetry.Event` with
+  `json:"key,omitempty"`, so existing sidecars without the field still parse.
+- `macos.StartTelemetry(captureKeys bool)`. When true, add `kCGEventKeyDown` and
+  `kCGEventFlagsChanged` to the tap's event mask. When false the mask is exactly what it
+  is today, so the current behaviour is bit-for-bit unchanged.
+- `keycode.go` maps virtual keycode + modifier flags → a display label: `⌘C`, `⏎`, `⇥`,
   `⎋`, `⌃C`, or the literal character. Pure lookup, unit-testable, no OS calls.
 
   Deliberately decoding from the **keycode**, not from `CGEventKeyboardGetUnicodeString`.
   Same result for normal typing, but it keeps the door open to a chords-only mode later
   without restructuring.
 
-**2. Model — new `keys.rs`**
+**2. Model — new `domain/keys`**
 
-A pure function in the style of `camera.rs`: telemetry + frame timestamps → one
-`Option<KeyOverlay { text, alpha }>` per frame.
+A pure function in the style of `domain/camera`: telemetry + frame timestamps → one
+`*Overlay{Text string; Alpha float64}` per frame.
 
 - Consecutive keys within ~1.2 s group into a single line, so `ls -la⏎` reads as one
   command rather than six flashes.
@@ -91,39 +88,40 @@ A pure function in the style of `camera.rs`: telemetry + frame timestamps → on
 
 No OS or GPU dependency, so it gets unit tests like the camera model does.
 
-**3. Render — new `overlay.rs`**
+**3. Render — new `platform/gpu/overlay.go`**
 
-Rasterize each distinct label once to an RGBA pill via CoreText (the `core-text` crate),
-cache it in a `HashMap<String, Bitmap>`, and alpha-blend it into the frame.
+Rasterize each distinct label once to an RGBA pill — CoreText through a small
+Objective-C helper in `platform/macos`, or `golang.org/x/image/font` with an embedded
+font — cache it in a `map[string]*image.RGBA`, and alpha-blend it into the frame.
 
-**Blend on the CPU, in the readback buffer** — `render.rs::render` already walks the output
-row by row to strip the 256-byte padding, so the pill can be composited in the same pass.
-A ~400×80 region at 60 fps is ~32k pixels a frame, which is nothing.
+**Blend on the CPU, in the readback buffer** — `gpu.Renderer.Render` already walks the
+output row by row to strip the 256-byte padding, so the pill can be composited in the same
+pass. A ~400×80 region at 60 fps is ~32k pixels a frame, which is nothing.
 
 The alternative — doing it in the shader — means a new bind group, a new texture and a
-changed `Uniforms` layout, and that struct's hand-written padding has to stay byte-exact
-with the WGSL. Not worth it for a static overlay. Recommend CPU.
+changed `uniforms` layout, and that struct has to stay byte-exact with the WGSL (a test
+pins it). Not worth it for a static overlay. Recommend CPU.
 
 ### Work items
 
 | # | File | Change |
 |---|---|---|
-| 1 | `src/config.rs` | New `[capture]` section with `keystrokes: bool` (default `false`); entry in `DEFAULT_TOML` carrying the warning. |
-| 2 | `src/capture/keycode.rs` *(new)* | Virtual keycode + modifier flags → label. Pure, tested. |
-| 3 | `src/capture/telemetry.rs` | `EventKind::Key`, `key: Option<String>` with `#[serde(default)]`, conditional tap mask, `start(capture_keys)`. |
-| 4 | `src/capture/recorder.rs` | Pass `config.capture.keystrokes` through; record it in `meta.json` so render knows whether keys exist. First real use of the `config` parameter it currently discards (`let _ = config;`). |
-| 5 | `src/keys.rs` *(new)* | Grouping, fade and truncation model. Pure, tested. |
-| 6 | `src/render/overlay.rs` *(new)* | CoreText label rasterization with a cache. |
-| 7 | `src/render/mod.rs` | Blend the overlay during the existing readback row walk. |
-| 8 | `src/render/export.rs` | Build the overlay track beside the crops; add a line to `Report`. |
-| 9 | `src/app/ui.rs` | Warning at record start (safeguard b); `doctor` line (d); key count in `health_report`. |
-| 10 | `src/main.rs` | `scrub` subcommand (safeguard f). |
-| 11 | README, `docs/code-tour.md` | Document the setting, the secure-input behaviour, and the new modules. |
+| 1 | `domain/config` | New `[capture]` section with `keystrokes` (default `false`); entry in the default file carrying the warning. |
+| 2 | `domain/keys/keycode.go` *(new)* | Virtual keycode + modifier flags → label. Pure, tested. |
+| 3 | `domain/telemetry`, `platform/macos/telemetry.m`, `screen.go` | `Key` event kind and field, conditional tap mask, `StartTelemetry(captureKeys)`. |
+| 4 | `features/record/record.go` | Pass `cfg.Capture.Keystrokes` through; record it in `meta.json` so render knows whether keys exist. |
+| 5 | `domain/keys` *(new)* | Grouping, fade and truncation model. Pure, tested. |
+| 6 | `platform/gpu/overlay.go` *(new)* | Label rasterization with a cache. |
+| 7 | `platform/gpu/renderer.go` | Blend the overlay during the existing readback row walk. |
+| 8 | `features/render/export.go` | Build the overlay track beside the crops; add a line to `Report`. |
+| 9 | `features/record` (command and tab), `features/doctor` | Warning at record start (safeguard b); `doctor` line (d); key count in the health report. |
+| 10 | `features/recordings` | `scrub` subcommand (safeguard f). |
+| 11 | README, `docs/code-tour.md` | Document the setting, the secure-input behaviour, and the new packages. |
 
-Items 1–5 and 9 are straightforward. **Item 6 is the only real unknown** — check
-`core-text` compatibility against the pinned `core-graphics 0.25` before committing to it.
-If it fights, the fallback is a pre-baked bitmap font atlas for the ~100 key labels, which
-is more tedious but has no dependency risk.
+Items 1–5 and 9 are straightforward. **Item 6 is the only real unknown** — choose between
+CoreText (best-looking, matches the system) and a pure-Go font rasterizer (no new cgo)
+before committing. If both fight, the fallback is a pre-baked bitmap font atlas for the
+~100 key labels, which is more tedious but has no dependency risk.
 
 ### Two decisions for you
 
@@ -134,5 +132,5 @@ is more tedious but has no dependency risk.
 2. **Full text or chords only.** Full text is required for the terminal use case you
    described, so that's the default I've planned for. A later `keystrokes = "chords"` mode
    — showing only `⌘`/`⌃`/`⌥` combinations and special keys, never plain characters —
-   would be the safer setting for recording anything involving a login. The `keycode.rs`
+   would be the safer setting for recording anything involving a login. The `keycode.go`
    design above keeps that cheap to add.

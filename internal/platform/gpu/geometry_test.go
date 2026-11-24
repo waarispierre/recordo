@@ -1,9 +1,7 @@
 package gpu
 
 import (
-	"bytes"
 	"math"
-	"os"
 	"testing"
 	"unsafe"
 
@@ -33,20 +31,6 @@ func TestUniformsLayoutMatchesTheShader(t *testing.T) {
 	}
 	if s := unsafe.Sizeof(u); s != 192 {
 		t.Errorf("uniforms is %d bytes, want 192", s)
-	}
-}
-
-func TestShaderMatchesTheRustCopy(t *testing.T) {
-	// Until the Rust code is deleted, both copies of the shader must stay identical.
-	rust, err := os.ReadFile("../../../src/render/shader.wgsl")
-	if os.IsNotExist(err) {
-		t.Skip("Rust shader gone")
-	}
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(rust, []byte(shaderSource)) {
-		t.Fatal("internal/render/shader.wgsl has drifted from src/render/shader.wgsl")
 	}
 }
 

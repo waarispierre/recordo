@@ -1,26 +1,29 @@
 #!/bin/bash
 # Asserts the built binary cannot reach the network.
 #
-# recordo's core promise is that recordings never leave the machine. That is a
-# property of the dependency graph, which a single careless `cargo add` can break — so it
-# is checked mechanically rather than assumed.
+# recordo's core promise is that recordings never leave the machine. That is a property of
+# the dependency graph, which a single careless `go get` can break — so it is checked
+# mechanically rather than assumed.
 #
-# One documented exception, verified rather than assumed: the `apple-cf` crate (a
-# transitive dependency of `screencapturekit`) ships a CFSocket wrapper including a
-# `cf_socket_create_udp_ipv4` helper, and it survives into the binary. No code here calls
-# it, so the capability is dormant — but it is present, and claiming otherwise would be
-# false. This script therefore asserts the property actually under our control: that
-# nothing in *this* crate, and no crate other than apple-cf, references a socket API.
+# Why Go symbols rather than socket imports: on macOS, Go's syscall package declares the
+# libc socket functions (_socket, _connect, _getaddrinfo, …) in every Go binary, whether
+# or not it ever networks, so their presence proves nothing. What does prove something is
+# the Go code the linker kept: it drops everything unreachable, so if no dialer, listener,
+# resolver, connection, HTTP or TLS code survives, there is no path to the network.
+#
+# One accepted import, verified rather than assumed: spf13/pflag (Cobra's flag parser)
+# imports the standard `net` package to parse IP-address flags. recordo defines none, and
+# the check below confirms that only net's inert parts (IP constants, init) are linked.
 #
 # Note on style: output is captured into variables before matching. Piping into `grep -q`
 # under `set -o pipefail` makes the pipeline fail when grep short-circuits and the
-# producer takes SIGPIPE — which silently inverted a check in an earlier version of this
-# script and reported PASS on a binary that should have failed.
+# producer takes SIGPIPE — which once silently inverted a check here and reported PASS on
+# a binary that should have failed.
 set -euo pipefail
 
-BIN="${1:-target/release/recordo}"
+BIN="${1:-bin/recordo}"
 if [[ ! -x "$BIN" ]]; then
-    echo "usage: $0 [path-to-binary]   (build first: cargo build --release)" >&2
+    echo "usage: $0 [path-to-binary]   (build first: go build -o bin/recordo ./cmd/recordo)" >&2
     exit 2
 fi
 
@@ -30,54 +33,42 @@ bad() { printf '  FAIL  %s\n' "$1" >&2; if [[ -n "${2:-}" ]]; then printf '%s\n'
 
 libs=$(otool -L "$BIN" || true)
 undefined=$(nm -u "$BIN" 2>/dev/null || true)
+gosyms=$(go tool nm "$BIN" 2>/dev/null | awk '{print $NF}' || true)
+
+# Guard the inputs positively. A tool that failed, or printed something unexpected, would
+# turn every check below into a no-op that always passes — so require what every real
+# answer contains: every macOS binary links libSystem, and every Go binary has main.main.
+if ! grep -q 'libSystem' <<<"$libs"; then
+    bad "could not read the binary's linked libraries (otool) — nothing was checked"
+fi
+if ! grep -qx 'main.main' <<<"$gosyms"; then
+    bad "could not read the binary's Go symbols (go tool nm) — nothing was checked"
+fi
 
 echo "== linked frameworks =="
 hits=$(printf '%s\n' "$libs" | grep -iE "CFNetwork|/Network\.framework|Security\.framework|libcurl" || true)
 if [[ -n "$hits" ]]; then bad "a networking framework is linked" "$hits"; else ok "no networking framework linked"; fi
 
-echo "== socket syscalls =="
-hits=$(printf '%s\n' "$undefined" | grep -E '^_(socket|connect|bind|listen|accept|sendto|recvfrom|getaddrinfo|gethostbyname)$' || true)
-if [[ -n "$hits" ]]; then bad "a raw socket syscall is imported" "$hits"; else ok "no raw socket syscalls"; fi
-
 echo "== URL loading =="
 hits=$(printf '%s\n' "$undefined" | grep -E "NSURLSession|NSURLConnection|CFURLConnection|CFHTTP" || true)
 if [[ -n "$hits" ]]; then bad "a URL-loading symbol is imported" "$hits"; else ok "no URL-loading symbols"; fi
 
-echo "== socket capability provenance =="
-# apple-cf's dormant CFSocket wrapper is the one accepted source. Anything else — above
-# all this crate itself — is a regression.
-offenders=""
-for rlib in target/release/deps/*.rlib; do
-    [[ -e "$rlib" ]] || continue
-    refs=$(nm -o "$rlib" 2>/dev/null | grep -E "CFSocket|_socket_create" || true)
-    [[ -n "$refs" ]] || continue
-    name=$(basename "$rlib")
-    [[ "$name" =~ ^libapple_cf ]] && continue
-    offenders+=" $name"
-done
-if [[ -n "$offenders" ]]; then
-    bad "socket APIs referenced by a crate other than apple-cf:$offenders"
+echo "== Go networking code =="
+hits=$(printf '%s\n' "$gosyms" | grep -E '^net\.(\(\*Dialer\)|Dial|Listen|\(\*Resolver\)|Lookup|\(\*sysDialer\)|\(\*conn\)|\(\*TCP|\(\*UDP|\(\*Unix)|^net/http\.|^crypto/tls\.|^golang\.org/x/net/' | head -20 || true)
+if [[ -n "$hits" ]]; then
+    bad "dialing, listening, resolving, HTTP or TLS code is linked" "$hits"
 else
-    ok "socket APIs confined to apple-cf's dormant wrapper (never called here)"
+    ok "no dialer, listener, resolver, connection, HTTP or TLS code linked"
 fi
 
-echo "== this crate calls no socket API =="
-# Guard the path itself: a rename that silently makes this grep search nothing would
-# turn the check into a no-op that always passes.
-if [[ ! -d src ]]; then
-    bad "src/ not found — this check would pass without inspecting anything"
+echo "== net importers =="
+importers=$(GOOS=darwin GOARCH=arm64 CGO_ENABLED=1 go list -deps -f '{{if not .Standard}}{{range .Imports}}{{if eq . "net"}}{{$.ImportPath}}{{"\n"}}{{end}}{{end}}{{end}}' ./cmd/recordo | grep -v '^$' || true)
+unexpected=$(printf '%s\n' "$importers" | grep -v '^github.com/spf13/pflag$' | grep -v '^$' || true)
+if [[ -n "$unexpected" ]]; then
+    bad "a package other than pflag imports net" "$unexpected"
 else
-    own=$(grep -rn "CFSocket\|udp_ipv4\|socket_create" src/ || true)
-    if [[ -n "$own" ]]; then
-        bad "recordo source references a socket API" "$own"
-    else
-        ok "no socket API referenced in src/"
-    fi
+    ok "only pflag imports net (IP-address flag parsing; recordo defines no such flag)"
 fi
-
-echo "== dependencies =="
-hits=$(grep -iE '^name = "(reqwest|hyper|ureq|curl|isahc|surf|attohttpc|tokio|async-std|socket2|rustls|native-tls|openssl)"' Cargo.lock || true)
-if [[ -n "$hits" ]]; then bad "a networking or TLS crate is in Cargo.lock" "$hits"; else ok "no networking or TLS crate in Cargo.lock"; fi
 
 echo
 if [[ $fail -eq 0 ]]; then

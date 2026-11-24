@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime/debug"
 
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
@@ -14,8 +15,19 @@ import (
 	"github.com/waarispierre/recordo/internal/domain/session"
 )
 
-// Version is set at build time with -ldflags "-X github.com/waarispierre/recordo/internal/cli.Version=…".
+// Version is set at build time with -ldflags "-X github.com/waarispierre/recordo/internal/cli.Version=…",
+// which install.sh does. A `go install …@version` build has no such flag, so it falls back
+// to the module version Go embeds in every binary.
 var Version = "dev"
+
+func init() {
+	if Version != "dev" {
+		return
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		Version = info.Main.Version
+	}
+}
 
 // Flags are the global options, shared by every subcommand as in the original CLI.
 type Flags struct {
