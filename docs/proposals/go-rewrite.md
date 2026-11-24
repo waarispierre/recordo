@@ -1,7 +1,7 @@
 # Go rewrite
 
-Status: in progress on the `go-rewrite` branch. The Rust code is still the working
-version until the Go version reaches parity. Then the Rust is deleted in one commit.
+Status: done on the `go-rewrite` branch (2026-11-24). The Go build reached parity, was
+restructured into vertical slices, and the Rust implementation was deleted.
 
 ## Decisions
 
@@ -44,8 +44,10 @@ internal/platform/    no feature logic
 internal/domain/      pure models: camera, pip, pauses, telemetry, frames, session, config
 ```
 
-Phases 1–4 were built in a layered layout (`internal/capture`, `internal/render`, …); the
-move to slices happens once the TUI port lands, in one pass.
+Phases 1–4 were built in a layered layout (`internal/capture`, `internal/render`, …) and
+moved to slices in three commits once the TUI port landed (dc3dc6d, 7c35ec5, d3ac939).
+The TUI shell lives in `internal/tui`, with what tabs share in `internal/tui/kit`;
+commands share `internal/cli`.
 
 ## Phases
 
@@ -101,6 +103,14 @@ Each phase ends with the Go code checked against the Rust it replaces.
     `capture.Main`.
   - `RECORDO_TRACE=1` prints each capture step with thread ids, and dumps goroutine
     stacks if stopping takes over 30s.
+
+- **Phase 4 done.** Full CLI (Cobra, fang, huh) and the Bubble Tea TUI, both verified on
+  a real Mac. Recording now waits for `camera.mp4` to start, so a cold camera no longer
+  leaves the opening seconds without the overlay.
+- **Phase 5 done.** CI, `install.sh`, the README, CONTRIBUTING, SECURITY and the code tour
+  describe the Go build; the Rust implementation is deleted (bb8ca8f). The no-network
+  check now reads the binary's Go symbols instead of socket imports, which every Go binary
+  on macOS declares.
 
 ## Environment notes
 
