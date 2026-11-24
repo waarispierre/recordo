@@ -10,9 +10,10 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/config"
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/config"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/record"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 // version is set at build time with -ldflags "-X main.version=…".
@@ -57,16 +58,16 @@ func override(on, off bool) *bool {
 	return nil
 }
 
-func target() capture.Target {
+func target() record.Target {
 	switch {
 	case opt.display:
-		return capture.Target{Kind: capture.TargetDisplay}
+		return record.Target{Kind: record.TargetDisplay}
 	case opt.window != 0:
-		return capture.Target{Kind: capture.TargetWindow, WindowID: opt.window}
+		return record.Target{Kind: record.TargetWindow, WindowID: opt.window}
 	case opt.app != "":
-		return capture.Target{Kind: capture.TargetApp, App: opt.app}
+		return record.Target{Kind: record.TargetApp, App: opt.app}
 	}
-	return capture.Target{Kind: capture.TargetAsk}
+	return record.Target{Kind: record.TargetAsk}
 }
 
 func rootCommand() *cobra.Command {
@@ -130,8 +131,8 @@ func rootCommand() *cobra.Command {
 
 func main() {
 	// The main thread belongs to macOS's run loop, which the webcam needs; the program
-	// runs on a goroutine. See capture.Main.
-	capture.Main(func() int {
+	// runs on a goroutine. See macos.Main.
+	macos.Main(func() int {
 		// No signal option: Ctrl-C while recording must end the recording cleanly, which
 		// the record command handles itself.
 		if err := fang.Execute(context.Background(), rootCommand(), fang.WithVersion(version)); err != nil {

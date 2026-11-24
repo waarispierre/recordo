@@ -5,7 +5,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/waarispierre/recordo/internal/config"
+	"github.com/waarispierre/recordo/internal/domain/config"
 )
 
 // Terminal styles. Printing goes through lipgloss.Printf/Println, which drop colour when

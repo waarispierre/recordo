@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"github.com/waarispierre/recordo/internal/features/record"
 	"image/color"
 	"path/filepath"
 	"strings"
@@ -12,7 +13,7 @@ import (
 	uv "github.com/charmbracelet/ultraviolet"
 	"github.com/charmbracelet/x/ansi"
 
-	"github.com/waarispierre/recordo/internal/config"
+	"github.com/waarispierre/recordo/internal/domain/config"
 )
 
 // rect is an area of the screen in cells.
@@ -208,7 +209,7 @@ func (m *Model) drawTabs(c *lipgloss.Canvas, r rect) {
 func (m *Model) drawRecord(c *lipgloss.Canvas, r rect) {
 	labels := []string{"entire display"}
 	for _, w := range m.windows {
-		labels = append(labels, w.Label())
+		labels = append(labels, record.Label(w))
 	}
 	drawList(c, r, " what to record ", labels, m.windowList)
 	m.drawPreview(c, r)

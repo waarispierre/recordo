@@ -13,11 +13,13 @@ import (
 	"github.com/charmbracelet/x/ansi"
 	"github.com/charmbracelet/x/exp/teatest/v2"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/config"
-	"github.com/waarispierre/recordo/internal/pauses"
-	"github.com/waarispierre/recordo/internal/render"
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/config"
+	"github.com/waarispierre/recordo/internal/domain/pauses"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/compress"
+	"github.com/waarispierre/recordo/internal/features/record"
+	"github.com/waarispierre/recordo/internal/features/render"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 // --- fakes --------------------------------------------------------------------------
@@ -25,14 +27,14 @@ import (
 type fakeCam struct {
 	mu      sync.Mutex
 	stopped bool
-	frame   capture.PreviewFrame
+	frame   macos.PreviewFrame
 }
 
-func (c *fakeCam) Preview() (capture.PreviewFrame, bool) {
+func (c *fakeCam) Preview() (macos.PreviewFrame, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.stopped {
-		return capture.PreviewFrame{}, false
+		return macos.PreviewFrame{}, false
 	}
 	return c.frame, true
 }
@@ -53,7 +55,7 @@ func (c *fakeCam) isStopped() bool {
 type fakes struct {
 	mu sync.Mutex
 
-	targets     []capture.Target
+	targets     []record.Target
 	configs     []config.Config
 	pauses      []pauses.Pause
 	recordErr   error
@@ -70,10 +72,10 @@ type fakes struct {
 
 func (f *fakes) deps() deps {
 	return deps{
-		windows: func() []capture.Window {
-			return []capture.Window{{ID: 42, AppName: "Safari", Title: "Docs", Frame: capture.Rect{W: 1200, H: 800}}}
+		windows: func() []macos.Window {
+			return []macos.Window{{ID: 42, AppName: "Safari", Title: "Docs", Frame: macos.Rect{W: 1200, H: 800}}}
 		},
-		record: func(s *session.Session, t capture.Target, cfg config.Config, o capture.RecordOptions) error {
+		record: func(s *session.Session, t record.Target, cfg config.Config, o record.RecordOptions) error {
 			f.mu.Lock()
 			f.targets = append(f.targets, t)
 			f.configs = append(f.configs, cfg)
@@ -87,7 +89,7 @@ func (f *fakes) deps() deps {
 			if err != nil {
 				return err
 			}
-			o.OnStart(&capture.Plan{Label: "Safari — Docs (1200x800)", Microphone: "Fake Mic"})
+			o.OnStart(&record.Plan{Label: "Safari — Docs (1200x800)", Microphone: "Fake Mic"})
 			log := pauses.NewLog(func() uint64 { return uint64(time.Now().UnixNano()) })
 			o.Stop(log)
 			o.Warn("a test warning")
@@ -96,8 +98,8 @@ func (f *fakes) deps() deps {
 			f.mu.Unlock()
 			return os.WriteFile(s.Capture(), []byte("capture"), 0o600)
 		},
-		health: func(*session.Session) (capture.Health, error) {
-			return capture.Health{Frames: 10, CursorSamples: 20, Clicks: 2, MedianGapMs: 5, TapInstalled: true}, nil
+		health: func(*session.Session) (record.Health, error) {
+			return record.Health{Frames: 10, CursorSamples: 20, Clicks: 2, MedianGapMs: 5, TapInstalled: true}, nil
 		},
 		render: func(src, dst string, o render.Options) (render.Report, error) {
 			f.mu.Lock()
@@ -114,14 +116,14 @@ func (f *fakes) deps() deps {
 			}
 			return render.Report{Frames: 100, VideoSeconds: 2, RenderSeconds: 1, OutW: 1920, OutH: 1080}, nil
 		},
-		compress: func(src, dst string, maxBytes uint64) (render.CompressReport, error) {
+		compress: func(src, dst string, maxBytes uint64) (compress.CompressReport, error) {
 			f.mu.Lock()
 			gate := f.compressGate
 			f.mu.Unlock()
 			if gate != nil {
 				<-gate
 			}
-			return render.CompressReport{InputBytes: 6, OutputBytes: 6, MaxBytes: maxBytes}, nil
+			return compress.CompressReport{InputBytes: 6, OutputBytes: 6, MaxBytes: maxBytes}, nil
 		},
 		openCamera: func(string) (framingCamera, error) {
 			c := &fakeCam{frame: grey(32, 24)}
@@ -148,7 +150,7 @@ func (f *fakes) snapshot() fakes {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return fakes{
-		targets: append([]capture.Target(nil), f.targets...), configs: append([]config.Config(nil), f.configs...),
+		targets: append([]record.Target(nil), f.targets...), configs: append([]config.Config(nil), f.configs...),
 		pauses: append([]pauses.Pause(nil), f.pauses...), camsAtStart: append([]bool(nil), f.camsAtStart...),
 		renders: append([]render.Options(nil), f.renders...), cams: append([]*fakeCam(nil), f.cams...),
 		trashed: append([]string(nil), f.trashed...), opened: append([]string(nil), f.opened...),
@@ -541,7 +543,7 @@ func TestRecordingWithPauseThenRender(t *testing.T) {
 	h.waitScreen(" done — press any key ")
 
 	f := h.fakes.snapshot()
-	if len(f.targets) != 1 || f.targets[0] != (capture.Target{Kind: capture.TargetWindow, WindowID: 42}) {
+	if len(f.targets) != 1 || f.targets[0] != (record.Target{Kind: record.TargetWindow, WindowID: 42}) {
 		t.Errorf("recorded %+v", f.targets)
 	}
 	if f.configs[0].Camera.ZoomPercent != 25 {
@@ -590,7 +592,7 @@ func TestSecondsLimitStopsTheRecording(t *testing.T) {
 	if !strings.Contains(report, "10 frames · 20 cursor samples") || !strings.Contains(report, "saved to ") {
 		t.Fatalf("report %q", report)
 	}
-	if got := h.fakes.snapshot().targets[0]; got.Kind != capture.TargetDisplay {
+	if got := h.fakes.snapshot().targets[0]; got.Kind != record.TargetDisplay {
 		t.Errorf("target %+v", got)
 	}
 	h.press(char('x'))
@@ -719,7 +721,7 @@ func TestCountdownWithWebcam(t *testing.T) {
 // --- units --------------------------------------------------------------------------
 
 func TestHealthLines(t *testing.T) {
-	got := healthLines(capture.Health{Frames: 3, CursorSamples: 1, MedianGapMs: 500})
+	got := healthLines(record.Health{Frames: 3, CursorSamples: 1, MedianGapMs: 500})
 	want := []string{
 		"3 frames · 1 cursor samples · 0 clicks",
 		"clicks were not recorded — grant Input Monitoring for click-zoom",
@@ -731,7 +733,7 @@ func TestHealthLines(t *testing.T) {
 }
 
 func TestSummarizeCompress(t *testing.T) {
-	got := summarizeCompress(render.CompressReport{
+	got := summarizeCompress(compress.CompressReport{
 		InputBytes: 90_000_000, OutputBytes: 30_000_000, MaxBytes: 25_000_000, Reencoded: true, VideoBitrateBps: 4_000_000,
 	}, 25, "/x/export-compressed.mp4")
 	want := "90.0 MB → 30.0 MB · 4.0 Mbps video\nstill 30.0 MB, over the 25 MB target — try a lower size\nsaved to /x/export-compressed.mp4"

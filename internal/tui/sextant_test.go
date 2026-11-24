@@ -6,12 +6,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/waarispierre/recordo/internal/capture"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 // grey is a flat mid-grey frame, so a rendered cell is only ever "drawn" or "masked".
-func grey(w, h uint32) capture.PreviewFrame {
-	return capture.PreviewFrame{RGB: bytes.Repeat([]byte{128}, int(w*h*3)), W: w, H: h}
+func grey(w, h uint32) macos.PreviewFrame {
+	return macos.PreviewFrame{RGB: bytes.Repeat([]byte{128}, int(w*h*3)), W: w, H: h}
 }
 
 func shape(cells [][]sextantCell) []string {
@@ -107,7 +107,7 @@ func TestMirroringDoesNotChangeWhichCellsAreDrawn(t *testing.T) {
 // the brighter half in front.
 func TestAContrastingCellSplitsIntoTwoColours(t *testing.T) {
 	// Left column white, right column black: every cell is the left-half block.
-	f := capture.PreviewFrame{W: 2, H: 1, RGB: []byte{255, 255, 255, 0, 0, 0}}
+	f := macos.PreviewFrame{W: 2, H: 1, RGB: []byte{255, 255, 255, 0, 0, 0}}
 	cells := renderSextants(f, 1, 1, false, false, false)
 	c := cells[0][0]
 	if c.glyph != '▌' || !c.hasBG || c.fg != (rgb{255, 255, 255}) || c.bg != (rgb{0, 0, 0}) {

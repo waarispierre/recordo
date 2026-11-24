@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/waarispierre/recordo/internal/config"
+	"github.com/waarispierre/recordo/internal/domain/config"
 )
 
 func configCommand() *cobra.Command {

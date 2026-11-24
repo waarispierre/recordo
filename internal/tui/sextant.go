@@ -7,9 +7,9 @@ import (
 
 	"charm.land/lipgloss/v2"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/config"
-	"github.com/waarispierre/recordo/internal/pip"
+	"github.com/waarispierre/recordo/internal/domain/config"
+	"github.com/waarispierre/recordo/internal/domain/pip"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 type rgb struct{ r, g, b uint8 }
@@ -28,7 +28,7 @@ type sextantCell struct {
 // sized and shaped the same way the export's picture-in-picture is configured — reusing
 // pip.PlaceRect with terminal-cell dimensions in place of output pixels, rather than
 // reinventing the corner math.
-func drawWebcamPip(c *lipgloss.Canvas, area rect, cfg config.WebcamSettings, thumb capture.PreviewFrame) {
+func drawWebcamPip(c *lipgloss.Canvas, area rect, cfg config.WebcamSettings, thumb macos.PreviewFrame) {
 	if area.w < 8 || area.h < 5 || thumb.W == 0 || thumb.H == 0 {
 		return
 	}
@@ -73,7 +73,7 @@ func drawWebcamPip(c *lipgloss.Canvas, area rect, cfg config.WebcamSettings, thu
 // circle masks against the box's inscribed circle and roundCorners approximates
 // corner_radius, both evaluated per sample — a partly covered cell keeps the samples that
 // are inside and leaves the rest transparent, which is what smooths the edge.
-func renderSextants(thumb capture.PreviewFrame, cols, rows int, circle, roundCorners, mirror bool) [][]sextantCell {
+func renderSextants(thumb macos.PreviewFrame, cols, rows int, circle, roundCorners, mirror bool) [][]sextantCell {
 	cols, rows = max(cols, 1), max(rows, 1)
 	subW, subH := float32(cols*2), float32(rows*3)
 

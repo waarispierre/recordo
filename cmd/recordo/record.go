@@ -13,9 +13,10 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/pauses"
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/pauses"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/record"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 func cmdRecord(cmd *cobra.Command) error {
@@ -40,9 +41,9 @@ func cmdRecord(cmd *cobra.Command) error {
 	banner()
 	stdin := bufio.NewReader(os.Stdin)
 
-	err = capture.Record(s, target(), cfg, capture.RecordOptions{
-		Choose: func(ws []capture.Window) (capture.Window, bool, error) { return chooseWindow(stdin, ws) },
-		OnStart: func(p *capture.Plan) {
+	err = record.Record(s, target(), cfg, record.RecordOptions{
+		Choose: func(ws []macos.Window) (macos.Window, bool, error) { return chooseWindow(stdin, ws) },
+		OnStart: func(p *record.Plan) {
 			say("%s %s", green.Bold(true).Render("recording"), dim.Render(p.Label))
 			say("%s %s", "         ", dim.Render(fmt.Sprintf("%dx%d at %dx", p.CaptureW, p.CaptureH, p.Scale)))
 			if p.Microphone != "" {
@@ -54,13 +55,13 @@ func cmdRecord(cmd *cobra.Command) error {
 			fmt.Println()
 		},
 		Stop: func(*pauses.Log) { waitForStop(stdin, opt.seconds) },
-		Warn: func(w capture.Warning) { say("%s %s", warn, string(w)) },
+		Warn: func(w record.Warning) { say("%s %s", warn, string(w)) },
 	})
 	if err != nil {
 		return err
 	}
 
-	h, err := capture.CheckHealth(s)
+	h, err := record.CheckHealth(s)
 	if err != nil {
 		return err
 	}
@@ -81,26 +82,26 @@ func banner() {
 
 // chooseWindow is a numbered picker, kept deliberately plain so it works over ssh and in
 // dumb terminals. 0 or an empty answer means the whole display.
-func chooseWindow(in *bufio.Reader, windows []capture.Window) (capture.Window, bool, error) {
+func chooseWindow(in *bufio.Reader, windows []macos.Window) (macos.Window, bool, error) {
 	if len(windows) == 0 {
 		say("no windows found — recording the whole display")
-		return capture.Window{}, false, nil
+		return macos.Window{}, false, nil
 	}
 	fmt.Println()
 	say("%s", bold.Render("what should I record?"))
 	fmt.Println()
 	say(" %s  entire display", cyan.Render("0"))
 	for i, w := range windows {
-		say("%s  %s", cyan.Render(fmt.Sprintf("%2d", i+1)), w.Label())
+		say("%s  %s", cyan.Render(fmt.Sprintf("%2d", i+1)), record.Label(w))
 	}
 	lipgloss.Printf("\n  %s ", bold.Render("choice [0]:"))
 	line, _ := in.ReadString('\n')
 	choice, _ := strconv.Atoi(strings.TrimSpace(line))
 	if choice <= 0 {
-		return capture.Window{}, false, nil
+		return macos.Window{}, false, nil
 	}
 	if choice > len(windows) {
-		return capture.Window{}, false, fmt.Errorf("no option %d", choice)
+		return macos.Window{}, false, fmt.Errorf("no option %d", choice)
 	}
 	return windows[choice-1], true, nil
 }
@@ -147,7 +148,7 @@ func waitForStop(in *bufio.Reader, seconds uint) {
 	}
 }
 
-func healthReport(h capture.Health) {
+func healthReport(h record.Health) {
 	say("%s %d frames · %d cursor samples · %d clicks", dot, h.Frames, h.CursorSamples, h.Clicks)
 	if !(h.MedianGapMs < 100) && h.CursorSamples > 10 {
 		say("%s cursor timing is off by %.0fms — zoom may lag the pointer", warn, h.MedianGapMs)

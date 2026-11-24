@@ -8,7 +8,7 @@
 // Recording also runs on a goroutine: unlike the Rust version, which had to keep the
 // capture on the main thread because tearing an AVCaptureSession down from a spawned
 // thread hung forever, the Go capture package marshals camera work onto the main run loop
-// itself (capture.Main), so the TUI can treat a recording like any other background job.
+// itself (macos.Main), so the TUI can treat a recording like any other background job.
 // Its Stop callback blocks on a channel the TUI closes, and services pause toggles sent
 // over another, so the pause log is only ever touched from the recorder's own goroutine.
 //
@@ -24,10 +24,12 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/config"
-	"github.com/waarispierre/recordo/internal/render"
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/config"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/compress"
+	"github.com/waarispierre/recordo/internal/features/record"
+	"github.com/waarispierre/recordo/internal/features/render"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 // Overrides are per-run settings that would otherwise come from CLI flags, so a bare
@@ -48,7 +50,7 @@ type Overrides struct {
 type previewCamera interface {
 	// Preview returns the newest thumbnail, ok=false when there is none yet or the camera
 	// has stopped. Safe from any goroutine.
-	Preview() (capture.PreviewFrame, bool)
+	Preview() (macos.PreviewFrame, bool)
 }
 
 // framingCamera is a preview-only camera the app opened itself and has to release.
@@ -63,37 +65,37 @@ type framingCamera interface {
 // state machine against fakes: the sandbox the tests run in has no screen recording,
 // camera or GPU.
 type deps struct {
-	windows    func() []capture.Window
-	record     func(*session.Session, capture.Target, config.Config, capture.RecordOptions) error
-	health     func(*session.Session) (capture.Health, error)
+	windows    func() []macos.Window
+	record     func(*session.Session, record.Target, config.Config, record.RecordOptions) error
+	health     func(*session.Session) (record.Health, error)
 	render     func(src, dst string, opts render.Options) (render.Report, error)
-	compress   func(src, dst string, maxBytes uint64) (render.CompressReport, error)
+	compress   func(src, dst string, maxBytes uint64) (compress.CompressReport, error)
 	openCamera func(device string) (framingCamera, error)
 	trash      func(dir string) error
 	open       func(path string)
 }
 
-// webcam adapts capture.Webcam to framingCamera.
-type webcam struct{ *capture.Webcam }
+// webcam adapts macos.Webcam to framingCamera.
+type webcam struct{ *macos.Webcam }
 
 func (w webcam) Name() string { return w.Webcam.Name }
 func (w webcam) Stop()        { _, _ = w.Webcam.Stop() }
 
 func realDeps() deps {
 	return deps{
-		windows: func() []capture.Window {
-			content, err := capture.ShareableContent()
+		windows: func() []macos.Window {
+			content, err := macos.ShareableContent()
 			if err != nil {
 				return nil
 			}
-			return content.Recordable()
+			return record.Recordable(content)
 		},
-		record:   capture.Record,
-		health:   capture.CheckHealth,
+		record:   record.Record,
+		health:   record.CheckHealth,
 		render:   render.Run,
-		compress: render.CompressToSize,
+		compress: compress.CompressToSize,
 		openCamera: func(device string) (framingCamera, error) {
-			cam, err := capture.StartWebcam(device, "", true)
+			cam, err := macos.StartWebcam(device, "", true)
 			if err != nil {
 				return nil, err
 			}
@@ -104,7 +106,7 @@ func realDeps() deps {
 	}
 }
 
-// Run shows the app until the user quits. It must run under capture.Main when the webcam
+// Run shows the app until the user quits. It must run under macos.Main when the webcam
 // may be used.
 func Run(o Overrides) error {
 	configPath, err := session.ConfigPath()

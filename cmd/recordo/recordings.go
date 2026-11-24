@@ -9,7 +9,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/session"
 )
 
 func cmdList() error {

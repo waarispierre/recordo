@@ -9,9 +9,10 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/render"
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/compress"
+	"github.com/waarispierre/recordo/internal/features/record"
+	"github.com/waarispierre/recordo/internal/features/render"
 )
 
 // jobProgress is (frames done, frames total), packed into one word so a reader never sees
@@ -30,7 +31,7 @@ func (p *jobProgress) get() (done, total int) {
 // startRenderOf renders a recording that was just made, then opens it. Unlike the Rust
 // version, a one-off --webcam/--no-webcam carries into this render, as it does on the CLI
 // path.
-func (m *Model) startRenderOf(s *session.Session, health capture.Health, warnings []string) tea.Cmd {
+func (m *Model) startRenderOf(s *session.Session, health record.Health, warnings []string) tea.Cmd {
 	run, opts, noOpen, open := m.deps.render, m.renderOptions(), m.overrides.NoOpen, m.deps.open
 	return m.startJob(jobRender, "rendering…", func(progress func(int, int)) (string, error) {
 		out := s.Export()
@@ -85,7 +86,7 @@ func (m *Model) startCompress(dir string, maxMB float64) tea.Cmd {
 // summarizeRecord is what the CLI's health report and render summary print, condensed
 // into the popup shown when a job finishes — that detail must not silently vanish now
 // that nothing prints to a plain terminal.
-func summarizeRecord(h capture.Health, rep render.Report, out string) string {
+func summarizeRecord(h record.Health, rep render.Report, out string) string {
 	lines := healthLines(h)
 	lines = append(lines, renderLine(rep))
 	if rep.CropSource == render.CropFixedGuess {
@@ -96,7 +97,7 @@ func summarizeRecord(h capture.Health, rep render.Report, out string) string {
 }
 
 // healthLines is the cursor/click sanity check the CLI prints after a recording.
-func healthLines(h capture.Health) []string {
+func healthLines(h record.Health) []string {
 	lines := []string{fmt.Sprintf("%d frames · %d cursor samples · %d clicks", h.Frames, h.CursorSamples, h.Clicks)}
 	gapOK := !math.IsNaN(h.MedianGapMs) && !math.IsInf(h.MedianGapMs, 0) && h.MedianGapMs < 100
 	if !gapOK && h.CursorSamples > 10 {
@@ -126,7 +127,7 @@ func renderLine(rep render.Report) string {
 	return fmt.Sprintf("%dx%d · %d frames · %.1fx realtime%s", rep.OutW, rep.OutH, rep.Frames, rep.RealtimeRatio(), extra)
 }
 
-func summarizeCompress(rep render.CompressReport, maxMB float64, dst string) string {
+func summarizeCompress(rep compress.CompressReport, maxMB float64, dst string) string {
 	mb := func(b uint64) float64 { return float64(b) / 1_000_000 }
 	var msg string
 	if rep.Reencoded {

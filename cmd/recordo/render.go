@@ -11,8 +11,9 @@ import (
 	"charm.land/lipgloss/v2"
 	"github.com/spf13/cobra"
 
-	"github.com/waarispierre/recordo/internal/render"
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/compress"
+	"github.com/waarispierre/recordo/internal/features/render"
 )
 
 func renderCommand() *cobra.Command {
@@ -117,7 +118,7 @@ func compressCommand() *cobra.Command {
 			src, dst := filepath.Join(dir, "export.mp4"), filepath.Join(dir, "export-compressed.mp4")
 			fmt.Println()
 			say("%s %s", green.Bold(true).Render("compressing"), dim.Render(dir))
-			rep, err := render.CompressToSize(src, dst, uint64(maxMB*1_000_000))
+			rep, err := compress.CompressToSize(src, dst, uint64(maxMB*1_000_000))
 			if err != nil {
 				return err
 			}

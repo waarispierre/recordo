@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/waarispierre/recordo/internal/config"
+	"github.com/waarispierre/recordo/internal/domain/config"
 )
 
 // sandboxHome points HOME (and so the config and recordings folders) at a temp dir.

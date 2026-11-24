@@ -18,10 +18,11 @@ import (
 	"charm.land/bubbles/v2/textinput"
 	tea "charm.land/bubbletea/v2"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/config"
-	"github.com/waarispierre/recordo/internal/pauses"
-	"github.com/waarispierre/recordo/internal/session"
+	"github.com/waarispierre/recordo/internal/domain/config"
+	"github.com/waarispierre/recordo/internal/domain/pauses"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/record"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 type tab int
@@ -119,7 +120,7 @@ type job struct {
 type countdown struct {
 	started    time.Time
 	length     time.Duration
-	target     capture.Target
+	target     record.Target
 	cfg        config.Config
 	hadPreview bool
 }
@@ -176,7 +177,7 @@ type (
 	}
 	recordedMsg struct {
 		session  *session.Session
-		health   capture.Health
+		health   record.Health
 		warnings []string
 		err      error
 	}
@@ -191,7 +192,7 @@ type Model struct {
 	height     int
 
 	tab           tab
-	windows       []capture.Window // offered after "entire display"
+	windows       []macos.Window // offered after "entire display"
 	windowList    listState
 	settings      []config.Setting
 	settingList   listState
@@ -212,7 +213,7 @@ type Model struct {
 	previewOpening  bool
 	previewSettings config.WebcamSettings
 	// thumb is the newest frame from whichever camera is on screen.
-	thumb *capture.PreviewFrame
+	thumb *macos.PreviewFrame
 
 	// report is a finished job's report, shown as a popup until the next keypress.
 	report    string
@@ -608,9 +609,9 @@ func (m *Model) normalKey(k tea.KeyPressMsg) tea.Cmd {
 	case key.Matches(k, keys.enter):
 		switch m.tab {
 		case tabRecord:
-			target := capture.Target{Kind: capture.TargetDisplay}
+			target := record.Target{Kind: record.TargetDisplay}
 			if i := m.windowList.selected; i > 0 && i <= len(m.windows) {
-				target = capture.Target{Kind: capture.TargetWindow, WindowID: m.windows[i-1].ID}
+				target = record.Target{Kind: record.TargetWindow, WindowID: m.windows[i-1].ID}
 			}
 			return m.startRecording(target)
 		case tabSettings:
@@ -859,7 +860,7 @@ func (m *Model) onPreview(msg previewMsg) {
 
 // startRecording applies the per-run overrides and either starts the pre-roll or the
 // recording itself.
-func (m *Model) startRecording(target capture.Target) tea.Cmd {
+func (m *Model) startRecording(target record.Target) tea.Cmd {
 	cfg, err := config.LoadOrCreate(m.configPath)
 	if err != nil {
 		m.status = "could not load config: " + err.Error()
@@ -895,7 +896,7 @@ func preRoll(cfg config.Config) time.Duration {
 	return time.Duration(float64(cfg.ClampedWebcam().PreviewS) * float64(time.Second))
 }
 
-func (m *Model) beginRecording(target capture.Target, cfg config.Config, hadPreview bool) tea.Cmd {
+func (m *Model) beginRecording(target record.Target, cfg config.Config, hadPreview bool) tea.Cmd {
 	m.countdown = nil
 	s, err := session.Create()
 	if err != nil {
@@ -926,18 +927,18 @@ func (m *Model) beginRecording(target capture.Target, cfg config.Config, hadPrev
 	m.rec = r
 	m.status = "recording…"
 
-	cams, record, health, seconds := m.cams, m.deps.record, m.deps.health, m.overrides.Seconds
+	cams, doRecord, health, seconds := m.cams, m.deps.record, m.deps.health, m.overrides.Seconds
 	return m.goBackground(func() tea.Msg {
 		cams.mu.Lock()
 		defer cams.mu.Unlock()
 		cams.release()
 
 		var warnings []string
-		err := record(s, target, cfg, capture.RecordOptions{
+		err := doRecord(s, target, cfg, record.RecordOptions{
 			// The TUI resolves a concrete target before it ever gets here, so the chooser
 			// — only invoked for TargetAsk — never runs.
-			Choose: func([]capture.Window) (capture.Window, bool, error) { return capture.Window{}, false, nil },
-			OnStart: func(p *capture.Plan) {
+			Choose: func([]macos.Window) (macos.Window, bool, error) { return macos.Window{}, false, nil },
+			OnStart: func(p *record.Plan) {
 				parts := []string{p.Label}
 				if p.Microphone != "" {
 					parts = append(parts, "mic: "+p.Microphone)
@@ -954,7 +955,7 @@ func (m *Model) beginRecording(target capture.Target, cfg config.Config, hadPrev
 			},
 			Stop: func(log *pauses.Log) { waitForStop(log, r.stop, r.toggle, live, seconds) },
 			// Printing would scribble over the screen; they go into the report instead.
-			Warn:          func(w capture.Warning) { warnings = append(warnings, string(w)) },
+			Warn:          func(w record.Warning) { warnings = append(warnings, string(w)) },
 			WebcamPreview: withPreview,
 		})
 		msg := recordedMsg{session: s, warnings: warnings, err: err}

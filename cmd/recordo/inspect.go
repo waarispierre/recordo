@@ -5,18 +5,19 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/waarispierre/recordo/internal/capture"
-	"github.com/waarispierre/recordo/internal/config"
-	"github.com/waarispierre/recordo/internal/session"
-	"github.com/waarispierre/recordo/internal/tools"
+	"github.com/waarispierre/recordo/internal/domain/config"
+	"github.com/waarispierre/recordo/internal/domain/session"
+	"github.com/waarispierre/recordo/internal/features/record"
+	"github.com/waarispierre/recordo/internal/platform/ffmpeg"
+	"github.com/waarispierre/recordo/internal/platform/macos"
 )
 
 func cmdWindows() error {
-	content, err := capture.ShareableContent()
+	content, err := macos.ShareableContent()
 	if err != nil {
 		return err
 	}
-	windows := content.Recordable()
+	windows := record.Recordable(content)
 	if len(windows) == 0 {
 		say("no windows found")
 		return nil
@@ -24,7 +25,7 @@ func cmdWindows() error {
 	fmt.Println()
 	say("%9s  %s", bold.Render("ID"), bold.Render("WINDOW"))
 	for _, w := range windows {
-		say("%s  %s", cyan.Render(fmt.Sprintf("%9d", w.ID)), w.Label())
+		say("%s  %s", cyan.Render(fmt.Sprintf("%9d", w.ID)), record.Label(w))
 	}
 	fmt.Println()
 	say("%s", dim.Render("recordo -w <ID>    or    recordo -a <app name>"))
@@ -33,7 +34,7 @@ func cmdWindows() error {
 }
 
 func cmdDevices() error {
-	list := func(title string, ds []capture.Device) {
+	list := func(title string, ds []macos.Device) {
 		fmt.Println()
 		say("%s", bold.Render(title))
 		if len(ds) == 0 {
@@ -43,8 +44,8 @@ func cmdDevices() error {
 			say("%s %s", dot, d.Name)
 		}
 	}
-	list("microphones", capture.Microphones())
-	list("cameras", capture.Cameras())
+	list("microphones", macos.Microphones())
+	list("cameras", macos.Cameras())
 	fmt.Println()
 	say("%s", dim.Render(`recordo config set audio.device "<name>"    or    webcam.device`))
 	fmt.Println()
@@ -73,19 +74,19 @@ func cmdDoctor(verbose bool) error {
 	fmt.Println()
 	say("%s", bold.Render("recordo doctor"))
 	fmt.Println()
-	_, err := capture.ShareableContent()
+	_, err := macos.ShareableContent()
 	check("Screen Recording", err == nil, "required — grant it to your terminal, then restart it")
-	check("Accessibility", capture.AccessibilityTrusted(),
+	check("Accessibility", macos.AccessibilityTrusted(),
 		"optional — without it, browser pages are cropped by a fixed guess")
 
 	// Read-only: these ask what was already decided and never prompt. A doctor command
 	// that pops a permission dialog is one nobody would run twice.
 	for _, p := range []struct {
 		name   string
-		access capture.Access
-	}{{"Microphone", capture.MicrophoneAccess()}, {"Camera", capture.CameraAccess()}} {
+		access macos.Access
+	}{{"Microphone", macos.MicrophoneAccess()}, {"Camera", macos.CameraAccess()}} {
 		mark := dim.Render("·")
-		if p.access == capture.Granted {
+		if p.access == macos.Granted {
 			mark = tick
 		}
 		say("%s %-18s %s", mark, p.name, dim.Render(p.access.Explain()))
@@ -94,7 +95,7 @@ func cmdDoctor(verbose bool) error {
 	// Report the absolute binary that will actually run, not merely "something named
 	// ffmpeg is on $PATH".
 	for _, name := range []string{"ffmpeg", "ffprobe"} {
-		if p, ok := tools.Find(name); ok {
+		if p, ok := ffmpeg.Find(name); ok {
 			say("%s %-18s %s", tick, name, dim.Render(p))
 		} else {
 			check(name, false, "required to render — brew install ffmpeg")
@@ -125,17 +126,17 @@ func cmdDoctor(verbose bool) error {
 func browserReport() error {
 	fmt.Println()
 	say("%s", bold.Render("browsers"))
-	content, err := capture.ShareableContent()
+	content, err := macos.ShareableContent()
 	if err != nil {
 		return err
 	}
 	found := false
-	for _, w := range content.Recordable() {
+	for _, w := range record.Recordable(content) {
 		if !config.IsBrowser(w.BundleID) {
 			continue
 		}
 		found = true
-		if r, ok := capture.WebContentRect(w.PID, w.Frame); ok {
+		if r, ok := macos.WebContentRect(w.PID, w.Frame); ok {
 			say("%s %-16spage %.0fx%.0f, chrome %.0fpt %s", dot, w.AppName, r.W, r.H, r.Y-w.Frame.Y, green.Render("exact"))
 		} else {
 			say("%s %-16s%s", dot, w.AppName, yellow.Render("page bounds unavailable — will use the fixed crop"))
