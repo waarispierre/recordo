@@ -6,6 +6,7 @@
 // frames up with cursor telemetry; it never touches the pixels.
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreVideo/CoreVideo.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <stdlib.h>
 #include <string.h>
@@ -123,6 +124,11 @@ char *rc_record_start(rc_record_opts o) {
 		cfg.height = o.height;
 		cfg.minimumFrameInterval = CMTimeMake(1, 60);
 		cfg.showsCursor = YES;
+		// Pin full-resolution BGRA. On recent macOS Apple's default became 420v (4:2:0
+		// YUV, video range), which halves colour resolution in both directions before the
+		// recorder encodes anything — text and coloured edges come out visibly soft. The
+		// Rust screencapturekit crate pins BGRA for the same reason.
+		cfg.pixelFormat = kCVPixelFormatType_32BGRA;
 		// The filter is display-scoped, so the output is display-sized; cropping to the
 		// window's frame is what keeps the menu bar, dock, desktop and every other app out
 		// of the video — a privacy property as much as a framing one.
