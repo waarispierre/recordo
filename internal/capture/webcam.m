@@ -156,14 +156,35 @@ static bool on_camera_thread(void (^block)(void)) {
 @end
 
 @interface RCMovieDelegate : NSObject <AVCaptureFileOutputRecordingDelegate>
-@property(nonatomic) dispatch_semaphore_t finished;
+@property(nonatomic) dispatch_semaphore_t started, finished;
 @property(nonatomic) NSError *error;
+// startNs is the host-clock time of camera.mp4's first frame, when macOS reports it
+// (15.2+). Earlier logged timestamps belong to frames the file never received.
+@property(atomic) uint64_t startNs;
+@property(atomic) bool hasStart;
 @end
 
 @implementation RCMovieDelegate
 - (instancetype)init {
-	if ((self = [super init])) _finished = dispatch_semaphore_create(0);
+	if ((self = [super init])) {
+		_started = dispatch_semaphore_create(0);
+		_finished = dispatch_semaphore_create(0);
+	}
 	return self;
+}
+- (void)captureOutput:(AVCaptureFileOutput *)o didStartRecordingToOutputFileAtURL:(NSURL *)url
+             startPTS:(CMTime)startPTS fromConnections:(NSArray *)connections {
+	double seconds = CMTimeGetSeconds(startPTS);
+	if (isfinite(seconds)) {
+		self.startNs = (uint64_t)(seconds * 1e9);
+		self.hasStart = true;
+	}
+	dispatch_semaphore_signal(self.started);
+}
+// Called instead of the above before macOS 15.2.
+- (void)captureOutput:(AVCaptureFileOutput *)o didStartRecordingToOutputFileAtURL:(NSURL *)url
+      fromConnections:(NSArray *)connections {
+	dispatch_semaphore_signal(self.started);
 }
 - (void)captureOutput:(AVCaptureFileOutput *)o didFinishRecordingToOutputFileAtURL:(NSURL *)url
       fromConnections:(NSArray *)connections error:(NSError *)error {
@@ -240,6 +261,12 @@ static char *webcam_start(const char *device_id, const char *path, bool want_pre
 			[[NSFileManager defaultManager] removeItemAtURL:url error:nil];
 			cam.movieDelegate = [[RCMovieDelegate alloc] init];
 			[cam.movie startRecordingToOutputFileURL:url recordingDelegate:cam.movieDelegate];
+			// A cold camera takes a second or two to deliver its first frame. Waiting for the
+			// file to really start means the screen recording, which starts next, does not
+			// begin with seconds of video and no webcam. If it never reports in, carry on:
+			// the render places the overlay by timestamp either way.
+			bool began = wait_pumping(cam.movieDelegate.started, 3);
+			RC_TRACE("webcam_start: camera.mp4 %s", began ? "started" : "did not report starting within 3s");
 		}
 		*name = strdup(dev.localizedName.UTF8String);
 		*out = (rc_webcam *)CFBridgingRetain(cam);
@@ -277,9 +304,17 @@ static char *webcam_stop(rc_webcam *handle, uint64_t **pts_ns, int *n) {
 			@synchronized(cam.timestamps) {
 				d = [cam.timestamps.pts copy];
 			}
-			*n = (int)(d.length / sizeof(uint64_t));
-			*pts_ns = malloc(d.length ?: 1);
-			memcpy(*pts_ns, d.bytes, d.length);
+			// Keep only frames camera.mp4 actually holds, so the log's first entry is the
+			// file's first frame — the render lines the two up on exactly that.
+			const uint64_t *all = d.bytes;
+			size_t count = d.length / sizeof(uint64_t), first = 0;
+			if (cam.movieDelegate.hasStart) {
+				uint64_t start = cam.movieDelegate.startNs;
+				while (first < count && all[first] < start) first++;
+			}
+			*n = (int)(count - first);
+			*pts_ns = malloc((count - first) * sizeof(uint64_t) ?: 1);
+			memcpy(*pts_ns, all + first, (count - first) * sizeof(uint64_t));
 		}
 		if (cam.previewQueue) dispatch_sync(cam.previewQueue, ^{});
 		RC_TRACE("webcam_stop: done");

@@ -19,19 +19,33 @@ version until the Go version reaches parity. Then the Rust is deleted in one com
 
 ## Layout
 
+Vertical slices (decided 2026-11-24): code is organised by feature, not by technical
+layer. A slice owns its use case, its CLI command and its TUI tab, so changing a feature
+touches one folder. Slices import `platform` and `domain`. A slice may call another
+slice's exported use case — recording ends with a render, and the recordings tab renders
+and compresses — but never its internals or its UI. The TUI shell composes the slices'
+views.
+
 ```
-cmd/recordo/          CLI entry point
-internal/camera       virtual camera solve (pure)            ← src/camera.rs
-internal/pip          webcam placement (pure)                ← src/pip.rs
-internal/pauses       pause log and timeline remap (pure)    ← src/capture/pauses.rs
-internal/telemetry    telemetry.json types (pure)            ← src/capture/telemetry.rs (types)
-internal/clock        mach time (cgo)                        ← src/capture/clock.rs
-internal/config       config.toml                            ← src/config.rs
-internal/session      session folders                        ← src/session.rs
-internal/capture      SCK, event tap, webcam, AX (cgo + ObjC) ← src/capture/*
-internal/render       WebGPU compositor + ffmpeg pipeline    ← src/render/*
-internal/tui          Bubble Tea app                         ← src/app/*
+cmd/recordo/          root command; wires the slices in
+internal/features/
+  record/             plan → capture → sidecars → health; `record`; TUI record tab
+  render/             session → export.mp4 (ffmpeg ⇄ GPU pipeline); `render`; progress view
+  compress/           fit an export under a size; `compress`
+  recordings/         list, prune, rename, delete; `list`, `prune`; TUI recordings tab
+  settings/           config menu/show/get/set/path/edit/reset; TUI settings tab
+  doctor/             `doctor`, `windows`, `devices`
+internal/tui/         shell only: tabs, layout, key routing
+internal/platform/    no feature logic
+  macos/              ScreenCaptureKit, event tap, AVFoundation, Accessibility, main loop
+  gpu/                WebGPU compositor + shader.wgsl
+  ffmpeg/             finding and running ffmpeg/ffprobe
+  clock/              mach time
+internal/domain/      pure models: camera, pip, pauses, telemetry, frames, session, config
 ```
+
+Phases 1–4 were built in a layered layout (`internal/capture`, `internal/render`, …); the
+move to slices happens once the TUI port lands, in one pass.
 
 ## Phases
 
