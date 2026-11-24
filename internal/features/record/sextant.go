@@ -1,4 +1,4 @@
-package tui
+package record
 
 import (
 	"image/color"
@@ -10,6 +10,7 @@ import (
 	"github.com/waarispierre/recordo/internal/domain/config"
 	"github.com/waarispierre/recordo/internal/domain/pip"
 	"github.com/waarispierre/recordo/internal/platform/macos"
+	"github.com/waarispierre/recordo/internal/tui/kit"
 )
 
 type rgb struct{ r, g, b uint8 }
@@ -28,8 +29,8 @@ type sextantCell struct {
 // sized and shaped the same way the export's picture-in-picture is configured — reusing
 // pip.PlaceRect with terminal-cell dimensions in place of output pixels, rather than
 // reinventing the corner math.
-func drawWebcamPip(c *lipgloss.Canvas, area rect, cfg config.WebcamSettings, thumb macos.PreviewFrame) {
-	if area.w < 8 || area.h < 5 || thumb.W == 0 || thumb.H == 0 {
+func drawWebcamPip(c *lipgloss.Canvas, area kit.Rect, cfg config.WebcamSettings, thumb macos.PreviewFrame) {
+	if area.W < 8 || area.H < 5 || thumb.W == 0 || thumb.H == 0 {
 		return
 	}
 	corner := pip.ParseCorner(cfg.Position)
@@ -48,19 +49,19 @@ func drawWebcamPip(c *lipgloss.Canvas, area rect, cfg config.WebcamSettings, thu
 	// pixels; in a couple of dozen terminal rows the same number is too small to frame a
 	// face by, so it only steers within a range big enough to actually judge framing.
 	sizePercent := max(32, min(cfg.SizePercent, 52))
-	r := pip.PlaceRect(float32(area.w), float32(area.h), corner, 1.0, 0, 0, sizePercent, aspect)
+	r := pip.PlaceRect(float32(area.W), float32(area.H), corner, 1.0, 0, 0, sizePercent, aspect)
 
 	round := func(v float32) int { return int(math.Round(float64(v))) }
-	x := area.x + min(round(r.X), max(area.w-4, 0))
-	y := area.y + min(round(r.Y), max(area.h-3, 0))
-	box := rect{
-		x: x,
-		y: y,
-		w: min(max(round(r.W), 4), max(area.w-(x-area.x), 0)),
-		h: min(max(round(r.H), 3), max(area.h-(y-area.y), 0)),
+	x := area.X + min(round(r.X), max(area.W-4, 0))
+	y := area.Y + min(round(r.Y), max(area.H-3, 0))
+	box := kit.Rect{
+		X: x,
+		Y: y,
+		W: min(max(round(r.W), 4), max(area.W-(x-area.X), 0)),
+		H: min(max(round(r.H), 3), max(area.H-(y-area.Y), 0)),
 	}
 	roundCorners := !circle && cfg.CornerRadius > 0
-	put(c, box, sextantString(renderSextants(thumb, box.w, box.h, circle, roundCorners, cfg.Mirror)))
+	kit.Put(c, box, sextantString(renderSextants(thumb, box.W, box.H, circle, roundCorners, cfg.Mirror)))
 }
 
 // renderSextants renders thumb into cols x rows terminal cells using 2x3 sextant glyphs.
@@ -232,7 +233,7 @@ func sextantString(cells [][]sextantCell) string {
 				b.WriteRune(cell.glyph)
 				continue
 			}
-			s := plain.Foreground(cell.fg.colour())
+			s := kit.Plain.Foreground(cell.fg.colour())
 			if cell.hasBG {
 				s = s.Background(cell.bg.colour())
 			}
