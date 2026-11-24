@@ -1,8 +1,10 @@
-package main
+// Package recordings is the recordings slice: list past recordings and prune them.
+package recordings
 
 import (
 	"bufio"
 	"fmt"
+	"github.com/waarispierre/recordo/internal/cli"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,22 +25,22 @@ func cmdList() error {
 	}
 	var shown []*session.Session
 	for _, s := range all {
-		if exists(s.Capture()) {
+		if cli.Exists(s.Capture()) {
 			shown = append(shown, s)
 		}
 	}
 	if len(shown) == 0 {
-		say("no recordings yet — run %s", cyan.Render("recordo"))
+		cli.Say("no recordings yet — run %s", cli.Cyan.Render("recordo"))
 		return nil
 	}
 	fmt.Println()
-	say("%s", dim.Render(root))
+	cli.Say("%s", cli.Dim.Render(root))
 	for _, s := range shown {
-		state := yellow.Render("raw only")
+		state := cli.Yellow.Render("raw only")
 		if s.HasExport() {
-			state = green.Render("rendered")
+			state = cli.Green.Render("rendered")
 		}
-		say("%s  %s", cyan.Render(filepath.Base(s.Dir)), state)
+		cli.Say("%s  %s", cli.Cyan.Render(filepath.Base(s.Dir)), state)
 	}
 	fmt.Println()
 	return nil
@@ -88,30 +90,30 @@ func cmdPrune(byAge bool, olderThan int64, all, yes bool) error {
 		}
 	}
 	if len(targets) == 0 {
-		say("nothing to prune")
+		cli.Say("nothing to prune")
 		return nil
 	}
 
 	fmt.Println()
 	for _, s := range targets {
-		action := yellow.Render("drop raw capture")
+		action := cli.Yellow.Render("drop raw capture")
 		if all {
-			action = red.Render("delete entirely")
+			action = cli.Red.Render("delete entirely")
 		}
-		say("%s  %s", cyan.Render(filepath.Base(s.Dir)), action)
+		cli.Say("%s  %s", cli.Cyan.Render(filepath.Base(s.Dir)), action)
 	}
 	fmt.Println()
-	say("%d recording(s), %.1f MB", len(targets), float64(freed)/1_048_576)
+	cli.Say("%d recording(s), %.1f MB", len(targets), float64(freed)/1_048_576)
 	fmt.Println()
 	if all {
-		say("%s this removes the rendered videos too", red.Render("!"))
+		cli.Say("%s this removes the rendered videos too", cli.Red.Render("!"))
 		fmt.Println()
 	}
 	if !yes {
-		fmt.Print("  " + bold.Render("proceed? [y/N]:") + " ")
+		fmt.Print("  " + cli.Bold.Render("proceed? [y/N]:") + " ")
 		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 		if a := strings.ToLower(strings.TrimSpace(line)); a != "y" && a != "yes" {
-			say("cancelled")
+			cli.Say("cancelled")
 			return nil
 		}
 	}
@@ -124,6 +126,17 @@ func cmdPrune(byAge bool, olderThan int64, all, yes bool) error {
 			return err
 		}
 	}
-	say("%s freed %.1f MB", tick, float64(freed)/1_048_576)
+	cli.Say("%s freed %.1f MB", cli.Tick, float64(freed)/1_048_576)
 	return nil
+}
+
+// Commands are `recordo list` and `recordo prune`.
+func Commands() []*cobra.Command {
+	return []*cobra.Command{
+		{
+			Use: "list", Short: "List past recordings", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return cmdList() },
+		},
+		pruneCommand(),
+	}
 }

@@ -1,8 +1,10 @@
-package main
+// Package settings is the settings slice: read, write, browse and reset config.toml.
+package settings
 
 import (
 	"errors"
 	"fmt"
+	"github.com/waarispierre/recordo/internal/cli"
 	"os"
 	"os/exec"
 	"strings"
@@ -14,7 +16,7 @@ import (
 	"github.com/waarispierre/recordo/internal/domain/config"
 )
 
-func configCommand() *cobra.Command {
+func Command() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "config",
 		Short: "Read and write settings",
@@ -37,7 +39,7 @@ func configCommand() *cobra.Command {
 		&cobra.Command{
 			Use: "set <key> <value>", Short: "Write one setting, e.g. camera.zoom_percent 30", Args: cobra.ExactArgs(2),
 			RunE: func(_ *cobra.Command, args []string) error {
-				path, err := configPath()
+				path, err := cli.ConfigPath()
 				if err != nil {
 					return err
 				}
@@ -48,14 +50,14 @@ func configCommand() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				say("%s %s = %s", tick, cyan.Render(key), bold.Render(value))
+				cli.Say("%s %s = %s", cli.Tick, cli.Cyan.Render(key), cli.Bold.Render(value))
 				return nil
 			},
 		},
 		&cobra.Command{
 			Use: "path", Short: "Print the config file path", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error {
-				path, err := configPath()
+				path, err := cli.ConfigPath()
 				if err == nil {
 					fmt.Println(path)
 				}
@@ -65,7 +67,7 @@ func configCommand() *cobra.Command {
 		&cobra.Command{
 			Use: "edit", Short: "Open the config in $EDITOR", Args: cobra.NoArgs,
 			RunE: func(*cobra.Command, []string) error {
-				_, path, err := loadConfig()
+				_, path, err := cli.LoadConfig()
 				if err != nil {
 					return err
 				}
@@ -78,7 +80,7 @@ func configCommand() *cobra.Command {
 				if err := resetConfig(); err != nil {
 					return err
 				}
-				say("%s restored defaults", tick)
+				cli.Say("%s restored defaults", cli.Tick)
 				return nil
 			},
 		},
@@ -87,7 +89,7 @@ func configCommand() *cobra.Command {
 }
 
 func configShow() error {
-	_, path, err := loadConfig()
+	_, path, err := cli.LoadConfig()
 	if err != nil {
 		return err
 	}
@@ -96,17 +98,17 @@ func configShow() error {
 		return err
 	}
 	fmt.Println()
-	say("%s", dim.Render(path))
+	cli.Say("%s", cli.Dim.Render(path))
 	fmt.Println()
 	for _, e := range entries {
-		say("%s %s%s", cyan.Render(fmt.Sprintf("%-28s", e.Key)), swatch(e.Value), e.Value)
+		cli.Say("%s %s%s", cli.Cyan.Render(fmt.Sprintf("%-28s", e.Key)), cli.Swatch(e.Value), e.Value)
 	}
 	fmt.Println()
 	return nil
 }
 
 func configGet(key string) error {
-	_, path, err := loadConfig()
+	_, path, err := cli.LoadConfig()
 	if err != nil {
 		return err
 	}
@@ -155,7 +157,7 @@ func setSetting(path, key, value string) (string, string, error) {
 }
 
 func resetConfig() error {
-	path, err := configPath()
+	path, err := cli.ConfigPath()
 	if err != nil {
 		return err
 	}
@@ -186,7 +188,7 @@ const (
 // configMenu is the interactive settings browser: pick a setting, edit it, repeat. Piped
 // or redirected input cannot drive a menu, so it prints the settings instead.
 func configMenu() error {
-	_, path, err := loadConfig()
+	_, path, err := cli.LoadConfig()
 	if err != nil {
 		return err
 	}
@@ -200,7 +202,7 @@ func configMenu() error {
 			return err
 		}
 		if len(settings) == 0 {
-			say("config is empty — try %s", cyan.Render("recordo config reset"))
+			cli.Say("config is empty — try %s", cli.Cyan.Render("recordo config reset"))
 			return nil
 		}
 		// Pad the key column so values line up and the list scans vertically.
@@ -210,13 +212,13 @@ func configMenu() error {
 		}
 		var options []huh.Option[string]
 		for _, s := range settings {
-			label := fmt.Sprintf("%-*s  %s%s", width, s.Key, swatch(s.Value), dim.Render(s.Value))
+			label := fmt.Sprintf("%-*s  %s%s", width, s.Key, cli.Swatch(s.Value), cli.Dim.Render(s.Value))
 			options = append(options, huh.NewOption(label, s.Key))
 		}
 		options = append(options,
-			huh.NewOption(cyan.Render("open in $EDITOR"), menuEditor),
-			huh.NewOption(yellow.Render("reset to defaults"), menuReset),
-			huh.NewOption(green.Render("done"), menuDone),
+			huh.NewOption(cli.Cyan.Render("open in $EDITOR"), menuEditor),
+			huh.NewOption(cli.Yellow.Render("reset to defaults"), menuReset),
+			huh.NewOption(cli.Green.Render("done"), menuDone),
 		)
 		choice := cursor
 		err = huh.NewForm(huh.NewGroup(
@@ -236,7 +238,7 @@ func configMenu() error {
 			if err := resetConfig(); err != nil {
 				return err
 			}
-			say("%s restored defaults", tick)
+			cli.Say("%s restored defaults", cli.Tick)
 			cursor = ""
 			continue
 		case menuEditor:
@@ -275,10 +277,10 @@ func editSetting(path string, s config.Setting) {
 	}
 	key, value, err := setSetting(path, s.Key, entered)
 	if err != nil {
-		say("%s %s rejected: %s — keeping %s", fail, bold.Render(entered), lastLine(err.Error()), bold.Render(s.Value))
+		cli.Say("%s %s rejected: %s — keeping %s", cli.Fail, cli.Bold.Render(entered), lastLine(err.Error()), cli.Bold.Render(s.Value))
 		return
 	}
-	say("%s %s = %s", tick, cyan.Render(key), bold.Render(value))
+	cli.Say("%s %s = %s", cli.Tick, cli.Cyan.Render(key), cli.Bold.Render(value))
 }
 
 // lastLine is the actual complaint in a multi-line parse error.

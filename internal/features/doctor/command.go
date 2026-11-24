@@ -1,7 +1,10 @@
-package main
+// Package doctor is the doctor slice: check permissions and tooling, and list what can
+// be recorded with — windows, cameras, microphones.
+package doctor
 
 import (
 	"fmt"
+	"github.com/waarispierre/recordo/internal/cli"
 
 	"github.com/spf13/cobra"
 
@@ -19,16 +22,16 @@ func cmdWindows() error {
 	}
 	windows := record.Recordable(content)
 	if len(windows) == 0 {
-		say("no windows found")
+		cli.Say("no windows found")
 		return nil
 	}
 	fmt.Println()
-	say("%9s  %s", bold.Render("ID"), bold.Render("WINDOW"))
+	cli.Say("%9s  %s", cli.Bold.Render("ID"), cli.Bold.Render("WINDOW"))
 	for _, w := range windows {
-		say("%s  %s", cyan.Render(fmt.Sprintf("%9d", w.ID)), record.Label(w))
+		cli.Say("%s  %s", cli.Cyan.Render(fmt.Sprintf("%9d", w.ID)), record.Label(w))
 	}
 	fmt.Println()
-	say("%s", dim.Render("recordo -w <ID>    or    recordo -a <app name>"))
+	cli.Say("%s", cli.Dim.Render("recordo -w <ID>    or    recordo -a <app name>"))
 	fmt.Println()
 	return nil
 }
@@ -36,31 +39,31 @@ func cmdWindows() error {
 func cmdDevices() error {
 	list := func(title string, ds []macos.Device) {
 		fmt.Println()
-		say("%s", bold.Render(title))
+		cli.Say("%s", cli.Bold.Render(title))
 		if len(ds) == 0 {
-			say("none found")
+			cli.Say("none found")
 		}
 		for _, d := range ds {
-			say("%s %s", dot, d.Name)
+			cli.Say("%s %s", cli.Dot, d.Name)
 		}
 	}
 	list("microphones", macos.Microphones())
 	list("cameras", macos.Cameras())
 	fmt.Println()
-	say("%s", dim.Render(`recordo config set audio.device "<name>"    or    webcam.device`))
+	cli.Say("%s", cli.Dim.Render(`recordo config set audio.device "<name>"    or    webcam.device`))
 	fmt.Println()
 	return nil
 }
 
 func check(name string, ok bool, hint string) {
 	if ok {
-		say("%s %-18s", tick, name)
+		cli.Say("%s %-18s", cli.Tick, name)
 	} else {
-		say("%s %-18s %s", fail, name, dim.Render(hint))
+		cli.Say("%s %-18s %s", cli.Fail, name, cli.Dim.Render(hint))
 	}
 }
 
-func doctorCommand() *cobra.Command {
+func doctorCmd() *cobra.Command {
 	var verbose bool
 	cmd := &cobra.Command{
 		Use: "doctor", Short: "Check permissions and tooling", Args: cobra.NoArgs,
@@ -72,7 +75,7 @@ func doctorCommand() *cobra.Command {
 
 func cmdDoctor(verbose bool) error {
 	fmt.Println()
-	say("%s", bold.Render("recordo doctor"))
+	cli.Say("%s", cli.Bold.Render("recordo doctor"))
 	fmt.Println()
 	_, err := macos.ShareableContent()
 	check("Screen Recording", err == nil, "required — grant it to your terminal, then restart it")
@@ -85,18 +88,18 @@ func cmdDoctor(verbose bool) error {
 		name   string
 		access macos.Access
 	}{{"Microphone", macos.MicrophoneAccess()}, {"Camera", macos.CameraAccess()}} {
-		mark := dim.Render("·")
+		mark := cli.Dim.Render("·")
 		if p.access == macos.Granted {
-			mark = tick
+			mark = cli.Tick
 		}
-		say("%s %-18s %s", mark, p.name, dim.Render(p.access.Explain()))
+		cli.Say("%s %-18s %s", mark, p.name, cli.Dim.Render(p.access.Explain()))
 	}
 
 	// Report the absolute binary that will actually run, not merely "something named
 	// ffmpeg is on $PATH".
 	for _, name := range []string{"ffmpeg", "ffprobe"} {
 		if p, ok := ffmpeg.Find(name); ok {
-			say("%s %-18s %s", tick, name, dim.Render(p))
+			cli.Say("%s %-18s %s", cli.Tick, name, cli.Dim.Render(p))
 		} else {
 			check(name, false, "required to render — brew install ffmpeg")
 		}
@@ -111,12 +114,12 @@ func cmdDoctor(verbose bool) error {
 		return err
 	}
 	fmt.Println()
-	say("%s %s", dim.Render("config"), cfg)
-	say("%s %s", dim.Render("videos"), videos)
+	cli.Say("%s %s", cli.Dim.Render("config"), cfg)
+	cli.Say("%s %s", cli.Dim.Render("videos"), videos)
 	if verbose {
 		return browserReport()
 	}
-	say("%s", dim.Render("--verbose adds per-browser detail"))
+	cli.Say("%s", cli.Dim.Render("--verbose adds per-browser detail"))
 	fmt.Println()
 	return nil
 }
@@ -125,7 +128,7 @@ func cmdDoctor(verbose bool) error {
 // whether a recording is cropped exactly or by the fixed fallback.
 func browserReport() error {
 	fmt.Println()
-	say("%s", bold.Render("browsers"))
+	cli.Say("%s", cli.Bold.Render("browsers"))
 	content, err := macos.ShareableContent()
 	if err != nil {
 		return err
@@ -137,14 +140,29 @@ func browserReport() error {
 		}
 		found = true
 		if r, ok := macos.WebContentRect(w.PID, w.Frame); ok {
-			say("%s %-16spage %.0fx%.0f, chrome %.0fpt %s", dot, w.AppName, r.W, r.H, r.Y-w.Frame.Y, green.Render("exact"))
+			cli.Say("%s %-16spage %.0fx%.0f, chrome %.0fpt %s", cli.Dot, w.AppName, r.W, r.H, r.Y-w.Frame.Y, cli.Green.Render("exact"))
 		} else {
-			say("%s %-16s%s", dot, w.AppName, yellow.Render("page bounds unavailable — will use the fixed crop"))
+			cli.Say("%s %-16s%s", cli.Dot, w.AppName, cli.Yellow.Render("page bounds unavailable — will use the fixed crop"))
 		}
 	}
 	if !found {
-		say("%s no browser windows open", dot)
+		cli.Say("%s no browser windows open", cli.Dot)
 	}
 	fmt.Println()
 	return nil
+}
+
+// Commands are `recordo doctor`, `windows` and `devices`.
+func Commands() []*cobra.Command {
+	return []*cobra.Command{
+		doctorCmd(),
+		{
+			Use: "windows", Short: "List windows that can be recorded", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return cmdWindows() },
+		},
+		{
+			Use: "devices", Short: "List cameras and microphones, and the names the config accepts", Args: cobra.NoArgs,
+			RunE: func(*cobra.Command, []string) error { return cmdDevices() },
+		},
+	}
 }
