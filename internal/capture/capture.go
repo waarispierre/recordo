@@ -16,11 +16,14 @@ import "C"
 
 import (
 	"errors"
+	"fmt"
 	"unsafe"
 )
 
 // Rect is a screen-space rectangle in points, top-left origin.
 type Rect struct{ X, Y, W, H float64 }
+
+func (r Rect) String() string { return fmt.Sprintf("%.0f,%.0f %.0fx%.0f", r.X, r.Y, r.W, r.H) }
 
 func rectFromC(r C.rc_rect) Rect {
 	return Rect{float64(r.x), float64(r.y), float64(r.w), float64(r.h)}
@@ -49,6 +52,9 @@ type Window struct {
 type Display struct {
 	ID            uint32
 	Width, Height uint32
+	// Frame is where the display sits in global screen points, the space window frames
+	// and cursor positions are reported in.
+	Frame Rect
 }
 
 // Content is everything ScreenCaptureKit can currently capture.
@@ -79,7 +85,7 @@ func ShareableContent() (*Content, error) {
 		})
 	}
 	for _, d := range unsafe.Slice(c.displays, int(c.n_displays)) {
-		out.Displays = append(out.Displays, Display{uint32(d.id), uint32(d.width), uint32(d.height)})
+		out.Displays = append(out.Displays, Display{uint32(d.id), uint32(d.width), uint32(d.height), rectFromC(d.frame)})
 	}
 	return out, nil
 }

@@ -81,6 +81,9 @@ type Options struct {
 	ZoomPercent *float64
 	// Progress, when non-nil, is called once per rendered frame with (done, total).
 	Progress func(done, total int)
+	// Webcam, when non-nil, overrides the config's webcam.enabled for this render, so a
+	// recording made with a one-off -webcam gets its overlay without editing the config.
+	Webcam *bool
 }
 
 // meta is the subset of meta.json the render reads. Every field is optional: older
@@ -275,6 +278,9 @@ func Run(src, dst string, opts Options) (rep Report, err error) {
 	}
 
 	var cam *webcamSetup
+	if opts.Webcam != nil {
+		cfg.Webcam.Enabled = *opts.Webcam
+	}
 	webcamCfg := cfg.ClampedWebcam()
 	if webcamCfg.Enabled && fileExists(sidecar("camera.mp4")) {
 		cam, err = startWebcam(webcamCfg, sidecar("camera.mp4"), sidecar("camera_frames.json"),

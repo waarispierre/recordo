@@ -25,6 +25,7 @@ typedef struct {
 typedef struct {
 	uint32_t id;
 	uint32_t width, height; // points
+	rc_rect frame;          // global points, same space as window frames
 } rc_display;
 
 typedef struct {
@@ -94,6 +95,21 @@ typedef struct {
 char *rc_record_start(rc_record_opts opts);
 // Stops recording, waits for the file to be finalised, and returns the frame log.
 char *rc_record_stop(rc_frame **frames, int *n_frames);
+
+// Webcam. device_id NULL picks the system default camera; path NULL opens it for the
+// preview only, writing nothing. Returns an error string Go frees, or NULL and sets *out
+// and *name (Go frees name).
+typedef struct rc_webcam rc_webcam;
+char *rc_webcam_start(const char *device_id, const char *path, bool preview, rc_webcam **out, char **name);
+// Stops and frees w. For a recording, waits for camera.mp4 to be finalised and returns
+// the frame log (pts in host-clock nanoseconds).
+char *rc_webcam_stop(rc_webcam *w, uint64_t **pts_ns, int *n);
+// Copies the newest preview frame (RGB, 3 bytes per pixel) into dst if it holds cap
+// bytes. Returns the frame's sequence number, 0 when there is none yet.
+uint64_t rc_webcam_preview(rc_webcam *w, uint8_t *dst, int cap, uint32_t *width, uint32_t *height);
+
+// Runs the main run loop forever. Must be called on the process's main thread.
+void rc_main_loop(void);
 
 // Default microphone's name, or NULL.
 char *rc_default_microphone(void);

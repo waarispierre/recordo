@@ -22,6 +22,10 @@ func cmdRecord(args []string) error {
 	windowID := fs.Uint("w", 0, "record this window id (see `recordo windows`)")
 	display := fs.Bool("display", false, "record the whole display")
 	seconds := fs.Uint("s", 0, "stop after this many seconds")
+	mic := fs.Bool("mic", false, "record voice over for this run only (overrides config)")
+	noMic := fs.Bool("no-mic", false, "no voice over for this run only (overrides config)")
+	webcam := fs.Bool("webcam", false, "record the webcam for this run only (overrides config)")
+	noWebcam := fs.Bool("no-webcam", false, "no webcam for this run only (overrides config)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -43,23 +47,31 @@ func cmdRecord(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *mic && *noMic || *webcam && *noWebcam {
+		return fmt.Errorf("-mic/-no-mic and -webcam/-no-webcam are each one or the other")
+	}
+	cfg.Audio.Microphone = (cfg.Audio.Microphone || *mic) && !*noMic
+	cfg.Webcam.Enabled = (cfg.Webcam.Enabled || *webcam) && !*noWebcam
 	s, err := session.Create()
 	if err != nil {
 		return err
 	}
 	stdin := bufio.NewReader(os.Stdin)
 
-	err = capture.Record(s, target, cfg,
-		func(ws []capture.Window) (capture.Window, bool, error) { return chooseWindow(stdin, ws) },
-		func(p *capture.Plan) {
+	err = capture.Record(s, target, cfg, capture.RecordOptions{
+		Choose: func(ws []capture.Window) (capture.Window, bool, error) { return chooseWindow(stdin, ws) },
+		OnStart: func(p *capture.Plan) {
 			fmt.Printf("\n  ● recording %s\n", p.Label)
 			if p.Microphone != "" {
 				fmt.Printf("  · voice over: %s\n", p.Microphone)
 			}
+			if p.Webcam != "" {
+				fmt.Printf("  · webcam: %s\n", p.Webcam)
+			}
 		},
-		func(*pauses.Log) { waitForStop(stdin, *seconds) },
-		func(w capture.Warning) { fmt.Printf("  ! %s\n", w) },
-	)
+		Stop: func(*pauses.Log) { waitForStop(stdin, *seconds) },
+		Warn: func(w capture.Warning) { fmt.Printf("  ! %s\n", w) },
+	})
 	if err != nil {
 		return err
 	}

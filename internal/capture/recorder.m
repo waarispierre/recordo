@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "bridge.h"
+#include "trace.h"
 
 SCContentFilter *rc_filter(SCShareableContent *content, uint32_t display_id, uint32_t window_id, NSString **error);
 
@@ -190,12 +191,15 @@ char *rc_record_stop(rc_frame **frames, int *n_frames) {
 		*frames = NULL;
 		*n_frames = 0;
 		if (stream == nil) return strdup("no recording is running");
+		RC_TRACE("record_stop: stopCapture");
 		NSError *err = run_sync(^(void (^done)(NSError *)) {
 			[stream stopCaptureWithCompletionHandler:done];
 		});
+		RC_TRACE("record_stop: capture stopped (%s), waiting for file", err ? "error" : "ok");
 		// Stopping capture ends the recording, but the file is only complete once the
 		// output says so; reading it before then finds a truncated MP4.
 		long waited = dispatch_semaphore_wait(delegate.finished, dispatch_time(DISPATCH_TIME_NOW, kTimeout));
+		RC_TRACE("record_stop: file %s, draining frames", waited == 0 ? "finished" : "TIMED OUT");
 		// Drain the sample queue so no frame is appended after the copy below.
 		dispatch_sync(sample_queue, ^{});
 
@@ -207,6 +211,7 @@ char *rc_record_stop(rc_frame **frames, int *n_frames) {
 		*frames = malloc(data.length ?: 1);
 		memcpy(*frames, data.bytes, data.length);
 
+		RC_TRACE("record_stop: done");
 		NSError *recErr = delegate.error;
 		stream = nil;
 		frame_log = nil;

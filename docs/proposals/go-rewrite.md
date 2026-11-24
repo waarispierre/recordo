@@ -73,8 +73,20 @@ Each phase ends with the Go code checked against the Rust it replaces.
   than on the Phase 2 recordings, so worth a crop-level comparison of `camera::solve`
   against `camera.Solve` (not yet done). Not yet covered: a window or browser target, the
   Accessibility path (not granted to the terminal), and voice-over.
-- **Phase 3, part 2 (next):** webcam (`AVCaptureMovieFileOutput` + frame log + TUI
-  preview sink).
+- **Phase 3 done.** Webcam recording, frame log and live preview, checked on
+  2026-11-24 with the overlay rendered. Fixes found on the way, none of which the Rust
+  build has:
+  - Capture pins BGRA; macOS's 4:2:0 default made recordings soft.
+  - Recording uses the display the window is on, not always the first display.
+  - Windows parked out of view (other Space, Stage Manager, a disconnected monitor)
+    are never offered or picked by `-a`.
+  - A one-off `-webcam` carries into the render; Rust reloads the config and drops it.
+  - **The main thread runs macOS's main run loop** (`capture.Main`). AVFoundation
+    delivers part of a camera session's work through the main queue; without this,
+    `stopRunning` blocks forever. Any Go entry point that uses the webcam must call
+    `capture.Main`.
+  - `RECORDO_TRACE=1` prints each capture step with thread ids, and dumps goroutine
+    stacks if stopping takes over 30s.
 
 ## Environment notes
 

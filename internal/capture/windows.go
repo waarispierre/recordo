@@ -55,6 +55,23 @@ func (w Window) Label() string {
 	return fmt.Sprintf("%s%s (%dx%d)", app, title, int(w.Frame.W), int(w.Frame.H))
 }
 
+// Visible keeps the windows that sit wholly on one of the displays. Windows macOS has
+// moved out of view — on another Space, stashed by Stage Manager, or left behind by a
+// disconnected monitor — report a frame parked past the screen edge, and recording one
+// can only produce black, so they are never offered.
+func Visible(windows []Window, displays []Display) []Window {
+	var out []Window
+	for _, w := range windows {
+		if _, ok := displayFor(displays, w.Frame); ok {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
+// Recordable is the windows worth offering: capturable and visible.
+func (c *Content) Recordable() []Window { return Visible(Capturable(c.Windows), c.Displays) }
+
 // LargestForApp picks the window to record for --app: a case-insensitive substring match
 // on the app name. An app usually has several windows — panels, inspectors, popovers —
 // and the largest is almost always the one worth recording.
@@ -62,7 +79,7 @@ func LargestForApp(windows []Window, name string) (Window, bool) {
 	var best Window
 	found := false
 	want := strings.ToLower(name)
-	for _, w := range Capturable(windows) {
+	for _, w := range windows {
 		if strings.Contains(strings.ToLower(w.AppName), want) && (!found || area(w) > area(best)) {
 			best, found = w, true
 		}

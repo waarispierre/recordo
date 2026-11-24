@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"runtime/pprof"
 	"slices"
 	"strings"
+	"time"
 	"unsafe"
 
 	"github.com/waarispierre/recordo/internal/clock"
@@ -59,6 +61,9 @@ type Plan struct {
 	// Webcam is the name of the camera being recorded, or "" when the overlay is off or
 	// the camera failed to open.
 	Webcam string
+	// Camera is the open webcam while recording, for a caller that wants its live
+	// preview (see WebcamPreview). nil when there is no webcam.
+	Camera *Webcam
 }
 
 // MakePlan resolves what will be recorded, without starting anything.
@@ -75,7 +80,7 @@ func MakePlan(target Target, choose Chooser) (*Plan, error) {
 	var window *Window
 	switch target.Kind {
 	case TargetAsk:
-		w, ok, err := choose(Capturable(content.Windows))
+		w, ok, err := choose(content.Recordable())
 		if err != nil {
 			return nil, err
 		}
@@ -83,30 +88,47 @@ func MakePlan(target Target, choose Chooser) (*Plan, error) {
 			window = &w
 		}
 	case TargetApp:
-		w, ok := LargestForApp(content.Windows, target.App)
+		w, ok := LargestForApp(content.Recordable(), target.App)
 		if !ok {
-			return nil, fmt.Errorf("no window found for %q — try `recordo windows`", target.App)
+			// Distinguish "no such app" from "its windows are all out of view".
+			if hidden, any := LargestForApp(Capturable(content.Windows), target.App); any {
+				w = hidden
+			} else {
+				return nil, fmt.Errorf("no window found for %q — try `recordo windows`", target.App)
+			}
 		}
 		window = &w
 	case TargetWindow:
-		i := slices.IndexFunc(Capturable(content.Windows), func(w Window) bool { return w.ID == target.WindowID })
+		all := Capturable(content.Windows)
+		i := slices.IndexFunc(all, func(w Window) bool { return w.ID == target.WindowID })
 		if i < 0 {
 			return nil, fmt.Errorf("no window with id %d — try `recordo windows`", target.WindowID)
 		}
-		w := Capturable(content.Windows)[i]
-		window = &w
+		window = &all[i]
 	}
 
-	dw, dh := float64(display.Width), float64(display.Height)
-	rect := Rect{0, 0, dw, dh}
-	label := fmt.Sprintf("entire display (%.0fx%.0f)", dw, dh)
 	var windowID uint32
+	label := ""
 	if window != nil {
-		if !onDisplay(window.Frame, dw, dh) {
-			return nil, fmt.Errorf("that window sits outside the %.0fx%.0f display, so it is on another Space. "+
-				"Switch to it first, or record the whole display", dw, dh)
+		// Record on the display the window is on, not just the first one: with two
+		// screens, the window is often on the other.
+		d, ok := displayFor(content.Displays, window.Frame)
+		if !ok {
+			var ds []string
+			for _, d := range content.Displays {
+				ds = append(ds, d.Frame.String())
+			}
+			return nil, fmt.Errorf("that window (%s at %s) is not on any display (%s), so it is on another Space. "+
+				"Switch to it first, or record the whole display",
+				window.Label(), window.Frame, strings.Join(ds, ", "))
 		}
-		rect, label, windowID = window.Frame, window.Label(), window.ID
+		display, label, windowID = d, window.Label(), window.ID
+	} else {
+		label = fmt.Sprintf("entire display (%dx%d)", display.Width, display.Height)
+	}
+	rect := display.Frame
+	if window != nil {
+		rect = window.Frame
 	}
 
 	s, err := PointPixelScale(display.ID, windowID)
@@ -126,11 +148,17 @@ func MakePlan(target Target, choose Chooser) (*Plan, error) {
 	}, nil
 }
 
-// onDisplay rejects windows parked on another Space: their reported frame is not
-// trustworthy and sits outside the display, which would silently crop to an empty region
-// and record pure black.
-func onDisplay(f Rect, dw, dh float64) bool {
-	return f.X >= 0 && f.Y >= 0 && f.X+f.W <= dw+1 && f.Y+f.H <= dh+1
+// displayFor is the display that wholly contains a window frame. Windows parked on
+// another Space report a frame outside every display, which would silently crop to an
+// empty region and record pure black, so they match none.
+func displayFor(displays []Display, f Rect) (Display, bool) {
+	for _, d := range displays {
+		if f.X >= d.Frame.X && f.Y >= d.Frame.Y &&
+			f.X+f.W <= d.Frame.X+d.Frame.W+1 && f.Y+f.H <= d.Frame.Y+d.Frame.H+1 {
+			return d, true
+		}
+	}
+	return Display{}, false
 }
 
 // microphone picks the microphone to record, as (device id, display name). An empty want
@@ -165,12 +193,25 @@ func microphone(want string) (id, name string, err error) {
 // Warning is something that degraded a recording without failing it.
 type Warning string
 
-// Record records until stop returns, writing the capture and its sidecars into s.
-//
-// stop is handed the recording's pause log; whatever it toggles is cut from the render,
-// not from the capture itself. onStart is called once recording has actually begun.
-func Record(s *session.Session, target Target, cfg config.Config, choose Chooser,
-	onStart func(*Plan), stop func(*pauses.Log), warn func(Warning)) error {
+// RecordOptions are the caller's hooks into a recording.
+type RecordOptions struct {
+	// Choose asks which window to record when the target is TargetAsk.
+	Choose Chooser
+	// OnStart is called once recording has actually begun.
+	OnStart func(*Plan)
+	// Stop blocks until the recording should end. It is handed the pause log; whatever
+	// it toggles is cut from the render, not from the capture itself.
+	Stop func(*pauses.Log)
+	// Warn reports something that degraded the recording without failing it.
+	Warn func(Warning)
+	// WebcamPreview asks the webcam for live thumbnails, read through Plan.Camera. It
+	// adds a throttled output to the camera session; leave it off when nothing shows them.
+	WebcamPreview bool
+}
+
+// Record records until opts.Stop returns, writing the capture and its sidecars into s.
+func Record(s *session.Session, target Target, cfg config.Config, opts RecordOptions) error {
+	choose, onStart, stop, warn := opts.Choose, opts.OnStart, opts.Stop, opts.Warn
 	plan, err := MakePlan(target, choose)
 	if err != nil {
 		return err
@@ -178,7 +219,7 @@ func Record(s *session.Session, target Target, cfg config.Config, choose Chooser
 
 	// Resolved before the stream is built, so a bad device name fails immediately rather
 	// than after a recording has already been made.
-	opts := C.rc_record_opts{
+	ropts := C.rc_record_opts{
 		display_id: C.uint32_t(plan.Display.ID),
 		width:      C.uint32_t(plan.CaptureW),
 		height:     C.uint32_t(plan.CaptureH),
@@ -200,19 +241,24 @@ func Record(s *session.Session, target Target, cfg config.Config, choose Chooser
 			return err
 		}
 		plan.Microphone = name
-		opts.microphone = true
+		ropts.microphone = true
 		if id != "" {
-			opts.microphone_id = cstr(id)
+			ropts.microphone_id = cstr(id)
 		}
 	}
 
-	rect := Rect{0, 0, float64(plan.Display.Width), float64(plan.Display.Height)}
+	// rect stays in global points: cursor telemetry is global, and the renderer subtracts
+	// this origin from it. ScreenCaptureKit's crop, though, is relative to the display.
+	rect := plan.Display.Frame
 	var webRect *Rect
 	if w := plan.Window; w != nil {
 		rect = w.Frame
-		opts.window_id = C.uint32_t(w.ID)
-		opts.crop = true
-		opts.source_rect = C.rc_rect{x: C.double(rect.X), y: C.double(rect.Y), w: C.double(rect.W), h: C.double(rect.H)}
+		ropts.window_id = C.uint32_t(w.ID)
+		ropts.crop = true
+		ropts.source_rect = C.rc_rect{
+			x: C.double(rect.X - plan.Display.Frame.X), y: C.double(rect.Y - plan.Display.Frame.Y),
+			w: C.double(rect.W), h: C.double(rect.H),
+		}
 		// Ask the browser where its page actually is, rather than guessing a fixed crop.
 		// Read before recording starts so the layout matches the frames.
 		if config.IsBrowser(w.BundleID) {
@@ -221,32 +267,63 @@ func Record(s *session.Session, target Target, cfg config.Config, choose Chooser
 			}
 		}
 	}
-	opts.path = cstr(s.Capture())
+	ropts.path = cstr(s.Capture())
 
 	if cfg.Webcam.Enabled {
-		warn("webcam not yet supported by the Go build — recording screen only")
+		cam, err := StartWebcam(cfg.Webcam.Device, s.Camera(), opts.WebcamPreview)
+		if err != nil {
+			warn(Warning("webcam unavailable, recording screen only: " + err.Error()))
+		} else {
+			plan.Camera, plan.Webcam = cam, cam.Name
+		}
 	}
 
 	C.rc_telemetry_start(C.uint32_t(telemetry.PollHz))
-	if e := C.rc_record_start(opts); e != nil {
+	if e := C.rc_record_start(ropts); e != nil {
 		tel := C.rc_telemetry_stop()
 		C.rc_telemetry_free(tel)
+		if plan.Camera != nil {
+			_, _ = plan.Camera.Stop()
+			_ = os.Remove(s.Camera())
+		}
 		defer C.free(unsafe.Pointer(e))
 		return errors.New(C.GoString(e))
 	}
 	onStart(plan)
 	log := pauses.NewLog(clock.NowNanos)
 	stop(log)
+	trace("stop requested")
 	ps := log.Finish(clock.NowNanos())
 
+	defer watchStop()()
+	trace("stopping screen capture")
 	var cframes *C.rc_frame
 	var nframes C.int
 	stopErr := C.rc_record_stop(&cframes, &nframes)
+	trace("stopping telemetry")
 	ctel := C.rc_telemetry_stop()
 	tel, reenabled := telemetryFromC(ctel)
 	C.rc_telemetry_free(ctel)
 	frameLog := framesFromC(cframes, int(nframes))
 	C.free(unsafe.Pointer(cframes))
+	if plan.Camera != nil {
+		trace("stopping webcam")
+		camFrames, err := plan.Camera.Stop()
+		trace("webcam stopped")
+		if err != nil {
+			// Whatever camera.mp4 holds is still usable; the render skips the overlay if
+			// it is not.
+			warn(Warning("webcam: " + err.Error()))
+		}
+		if err := writeJSON(s.CameraFrames(), camFrames); err != nil {
+			return err
+		}
+		if _, err := os.Stat(s.Camera()); err == nil {
+			if err := session.Restrict(s.Camera()); err != nil {
+				return err
+			}
+		}
+	}
 	if stopErr != nil {
 		defer C.free(unsafe.Pointer(stopErr))
 		return errors.New(C.GoString(stopErr))
@@ -288,16 +365,43 @@ func Record(s *session.Session, target Target, cfg config.Config, choose Chooser
 		m["web_rect"] = map[string]float64{"x": webRect.X, "y": webRect.Y, "w": webRect.W, "h": webRect.H}
 	}
 	for path, v := range map[string]any{s.Telemetry(): tel, s.Frames(): frameLog, s.Meta(): m} {
-		b, err := json.MarshalIndent(v, "", "  ")
-		if err != nil {
-			return fmt.Errorf("encode %s: %w", path, err)
-		}
-		if err := session.WritePrivate(path, b); err != nil {
+		if err := writeJSON(path, v); err != nil {
 			return err
 		}
 	}
 	// ScreenCaptureKit writes the capture with the default umask.
 	return session.Restrict(s.Capture())
+}
+
+// tracing is RECORDO_TRACE=1: step-by-step timings for diagnosing a hang.
+var tracing = os.Getenv("RECORDO_TRACE") != ""
+
+func trace(msg string) {
+	if tracing {
+		fmt.Fprintf(os.Stderr, "  [trace go %s] %s\n", time.Now().Format("15:04:05.000"), msg)
+	}
+}
+
+// watchStop, when tracing, dumps every goroutine's stack if stopping takes longer than
+// every timeout in the stop path combined, then exits. Call the returned func when done.
+func watchStop() func() {
+	if !tracing {
+		return func() {}
+	}
+	t := time.AfterFunc(30*time.Second, func() {
+		fmt.Fprintln(os.Stderr, "  [trace] stop has taken 30s; goroutine stacks follow")
+		_ = pprof.Lookup("goroutine").WriteTo(os.Stderr, 2)
+		os.Exit(3)
+	})
+	return func() { t.Stop() }
+}
+
+func writeJSON(path string, v any) error {
+	b, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode %s: %w", path, err)
+	}
+	return session.WritePrivate(path, b)
 }
 
 func nullable(s string) any {

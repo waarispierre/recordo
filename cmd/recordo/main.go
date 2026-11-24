@@ -10,19 +10,24 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/waarispierre/recordo/internal/capture"
 	"github.com/waarispierre/recordo/internal/render"
 	"github.com/waarispierre/recordo/internal/session"
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "\n  error: %v\n\n", err)
-		os.Exit(1)
-	}
+	// The main thread belongs to macOS's run loop; the program runs on a goroutine.
+	capture.Main(func() int {
+		if err := run(os.Args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "\n  error: %v\n\n", err)
+			return 1
+		}
+		return 0
+	})
 }
 
 const usage = `usage:
-  recordo render [-zoom N] [-o FILE] [SESSION_DIR]
+  recordo render [-zoom N] [-o FILE] [-webcam | -no-webcam] [SESSION_DIR]
   recordo record [-a APP | -w ID | -display] [-s SECONDS]
   recordo windows
   recordo devices
@@ -56,6 +61,8 @@ func cmdRender(args []string) error {
 	fs := flag.NewFlagSet("render", flag.ContinueOnError)
 	zoom := fs.Float64("zoom", -1, "zoom percent for this render only")
 	out := fs.String("o", "", "output file (default: export.mp4 in the session)")
+	webcam := fs.Bool("webcam", false, "composite the webcam for this render only (overrides config)")
+	noWebcam := fs.Bool("no-webcam", false, "leave the webcam out for this render only (overrides config)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -84,6 +91,10 @@ func cmdRender(args []string) error {
 	}}
 	if *zoom >= 0 {
 		opts.ZoomPercent = zoom
+	}
+	if *webcam || *noWebcam {
+		on := *webcam
+		opts.Webcam = &on
 	}
 	fmt.Printf("  rendering %s\n", s.Dir)
 	rep, err := render.Run(s.Capture(), dst, opts)

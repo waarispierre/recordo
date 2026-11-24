@@ -18,6 +18,7 @@
 #include <string.h>
 #include <unistd.h>
 #include "bridge.h"
+#include "trace.h"
 
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
 static rc_event *events;
@@ -148,8 +149,11 @@ void rc_telemetry_start(uint32_t hz) {
 
 rc_telemetry rc_telemetry_stop(void) {
 	atomic_store(&stopping, true);
+	RC_TRACE("telemetry_stop: joining poller");
 	pthread_join(poller, NULL);
+	RC_TRACE("telemetry_stop: joining tap");
 	pthread_join(tapper, NULL);
+	RC_TRACE("telemetry_stop: done");
 	pthread_mutex_lock(&mu);
 	rc_telemetry out = {events, n_events, atomic_load(&tap_installed), atomic_load(&tap_reenabled)};
 	events = NULL;

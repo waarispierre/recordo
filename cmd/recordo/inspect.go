@@ -14,14 +14,18 @@ func cmdWindows() error {
 	if err != nil {
 		return err
 	}
-	windows := capture.Capturable(content.Windows)
+	windows := content.Recordable()
 	if len(windows) == 0 {
 		fmt.Println("  no windows found")
 		return nil
 	}
-	fmt.Printf("\n  %9s  %s\n", "ID", "WINDOW")
+	fmt.Printf("\n  %9s  %s\n", "DISPLAY", "FRAME (points)")
+	for _, d := range content.Displays {
+		fmt.Printf("  %9d  %s\n", d.ID, d.Frame)
+	}
+	fmt.Printf("\n  %9s  %-22s %s\n", "ID", "FRAME (points)", "WINDOW")
 	for _, w := range windows {
-		fmt.Printf("  %9d  %s\n", w.ID, w.Label())
+		fmt.Printf("  %9d  %-22s %s\n", w.ID, w.Frame, w.Label())
 	}
 	fmt.Print("\n  recordo -w <ID>    or    recordo -a <app name>\n\n")
 	return nil
@@ -107,7 +111,7 @@ func browserReport() error {
 		return err
 	}
 	found := false
-	for _, w := range capture.Capturable(content.Windows) {
+	for _, w := range content.Recordable() {
 		if !config.IsBrowser(w.BundleID) {
 			continue
 		}

@@ -62,7 +62,9 @@ rc_content rc_shareable_content(void) {
 		out.n_displays = (int)displays.count;
 		out.displays = calloc(displays.count ?: 1, sizeof(rc_display));
 		for (NSUInteger i = 0; i < displays.count; i++) {
-			out.displays[i] = (rc_display){displays[i].displayID, (uint32_t)displays[i].width, (uint32_t)displays[i].height};
+			CGRect f = displays[i].frame;
+			out.displays[i] = (rc_display){displays[i].displayID, (uint32_t)displays[i].width, (uint32_t)displays[i].height,
+			                               {f.origin.x, f.origin.y, f.size.width, f.size.height}};
 		}
 	}
 	return out;
