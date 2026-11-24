@@ -49,6 +49,22 @@ Each phase ends with the Go code checked against the Rust it replaces.
 5. **Cut over.** Update `ci/main.go`, `install.sh`, README and the code tour, then delete
    the Rust.
 
+## Progress
+
+- **Phase 1 done.** All pure-logic packages ported with their tests.
+- **Phase 2 done.** Checked against the Rust build on two recordings:
+
+  | Recording | Rust | Go | PSNR vs Rust |
+  |---|---|---|---|
+  | Safari, webcam, AX page bounds, 20.5s | 7.35s | 6.07s | 83.8 dB avg, 56.9 dB worst |
+  | Chrome, a pause, fixed-crop fallback, 43.5s | 14.69s | 11.24s | identical |
+
+  Go is faster because decode, composite and encode overlap on goroutines
+  (`internal/render/pipeline.go`); the Rust loop runs them in sequence. The small
+  difference on the Safari recording is probably the Go compiler fusing floating-point
+  multiply-adds on arm64; this is unverified and far below what is visible. Not yet
+  covered: a recording with a voice-over track.
+
 ## Environment notes
 
 - The Claude Code sandbox hides the GPU (`MTLCreateSystemDefaultDevice` returns nil).

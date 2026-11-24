@@ -12,6 +12,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"github.com/waarispierre/recordo/internal/camera"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -100,28 +101,9 @@ type StyleSettings struct {
 	BrowserCropTop float32
 }
 
-// CameraConfig is the resolved camera model input. It mirrors the camera package's
-// config; that package maps from this.
-type CameraConfig struct {
-	MaxZoom               float64
-	ZoomInS               float64
-	HoldS                 float64
-	ZoomOutS              float64
-	FollowHz              float64
-	FollowDeadzonePercent float64
-}
-
-// DefaultCameraConfig is the camera model's default tuning.
-func DefaultCameraConfig() CameraConfig {
-	return CameraConfig{
-		MaxZoom:               1.45,
-		ZoomInS:               0.45,
-		HoldS:                 1.30,
-		ZoomOutS:              0.70,
-		FollowHz:              1.1,
-		FollowDeadzonePercent: 10.0,
-	}
-}
+// CameraConfig is the camera model input. It is the camera package's own type, so the
+// defaults live in one place.
+type CameraConfig = camera.Config
 
 // Chrome is the synthetic window frame drawn around the capture.
 type Chrome int
@@ -180,7 +162,7 @@ func DefaultStyle() Style {
 
 // Default is the configuration used for anything the file does not name.
 func Default() Config {
-	cam := DefaultCameraConfig()
+	cam := camera.DefaultConfig()
 	style := DefaultStyle()
 	return Config{
 		Camera: CameraSettings{
