@@ -5,34 +5,23 @@ on:
     branches: [main]
   pull_request:
 
-# Runs exactly what `go run ci/main.go` runs on a laptop, so green here and green there mean
-# the same thing. CI is set by GitHub, which makes the runner treat a missing tool as a
+# Runs exactly what `go run ./ci` runs on a laptop, so green here and green there mean the
+# same thing. CI is set by GitHub, which makes the runner treat a missing tool as a
 # failure rather than skipping the check.
 jobs:
   ci:
-    # macOS 26, not 15. SCRecordingOutput needs macOS 15, but the apple-metal crate's
-    # Swift bridge references MTLSamplerReductionMode and MTLSamplerDescriptor.lodBias
-    # behind `if #available(macOS 26.0, *)`. That is a runtime guard — the code still has
-    # to compile against the SDK — so anything older than a macOS 26 SDK fails to build.
-    runs-on: macos-26
+    # macOS 15: recording writes through ScreenCaptureKit's SCRecordingOutput, which macOS
+    # 15 introduced, and the cgo build compiles against that SDK.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      # The CI runner is a single stdlib-only file, so there is no module to cache.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.24"
+          go-version-file: go.mod
 
       - name: Install check tooling
-        run: |
-          cargo install cargo-deny --locked
-          brew install shellcheck
+        run: brew install shellcheck
 
       - name: Run CI
-        run: go run ci/main.go
+        run: go run ./ci

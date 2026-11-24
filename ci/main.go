@@ -7,9 +7,9 @@
 // on whether a human or a runner is watching.
 //
 // Checks are grouped by what they require, not by preference. recordo compiles only on
-// macOS — it links ScreenCaptureKit, builds a Swift shim and renders through Metal — so
-// anything needing a build is macOS-only. The rest reads source and metadata and runs
-// anywhere.
+// macOS — it calls ScreenCaptureKit and AVFoundation through cgo and renders through
+// Metal — so anything needing a build is macOS-only. The rest reads source and metadata
+// and runs anywhere.
 package main
 
 import (
@@ -19,7 +19,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -37,33 +39,28 @@ type check struct {
 	install string
 }
 
-// portable checks read source and metadata. No build, so any OS, and they do not
-// contend for cargo's target-directory lock — which is what makes running them
-// concurrently safe.
+// portable checks read source and metadata. They build nothing that needs macOS, so they
+// run anywhere, and concurrently.
 var portable = []check{
-	{name: "format", argv: []string{"cargo", "fmt", "--all", "--check"}, tool: "cargo"},
-	{
-		name:    "licences",
-		argv:    []string{"cargo", "deny", "check"},
-		tool:    "cargo-deny",
-		install: "cargo install cargo-deny --locked",
-	},
+	{name: "format", fn: checkFormat, tool: "gofmt"},
+	{name: "modules", argv: []string{"go", "mod", "verify"}, tool: "go"},
+	{name: "licences", fn: checkLicences, tool: "go"},
 	{
 		name:    "shell",
 		argv:    []string{"shellcheck", "install.sh", "scripts/check-local-only.sh"},
 		tool:    "shellcheck",
 		install: "brew install shellcheck",
 	},
-	{name: "no-network-deps", fn: checkNoNetworkDeps},
+	{name: "no-network-deps", fn: checkNoNetworkDeps, tool: "go"},
 }
 
-// native checks need a working build, so macOS — and they run one at a time, because
-// cargo locks the target directory.
+// native checks need a working build — cgo against ScreenCaptureKit, AVFoundation and
+// Metal — so macOS, one at a time: each builds on the one before.
 var native = []check{
-	{name: "clippy", argv: []string{"cargo", "clippy", "--all-targets", "--", "-D", "warnings"}, tool: "cargo"},
-	{name: "test", argv: []string{"cargo", "test"}, tool: "cargo"},
-	{name: "build", argv: []string{"cargo", "build", "--release"}, tool: "cargo"},
-	{name: "no-network-binary", argv: []string{"./scripts/check-local-only.sh"}},
+	{name: "vet", argv: []string{"go", "vet", "./..."}, tool: "go"},
+	{name: "test", argv: []string{"go", "test", "-race", "./..."}, tool: "go"},
+	{name: "build", argv: []string{"go", "build", "-trimpath", "-o", "bin/recordo", "./cmd/recordo"}, tool: "go"},
+	{name: "no-network-binary", argv: []string{"./scripts/check-local-only.sh", "bin/recordo"}},
 }
 
 type result struct {
@@ -196,36 +193,147 @@ func report(results []result, tag string) error {
 	return failed
 }
 
-// checkNoNetworkDeps guards recordo's central promise at the dependency level.
-//
-// scripts/check-local-only.sh asserts the same property against a built binary, but that
-// needs macOS. This catches a networking crate the moment it enters Cargo.lock, anywhere.
-func checkNoNetworkDeps() error {
-	lock, err := os.ReadFile("Cargo.lock")
+// checkFormat fails when any Go file is not gofmt-clean.
+func checkFormat() error {
+	out, err := exec.Command("gofmt", "-l", "cmd", "internal", "ci").CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("read Cargo.lock: %w", err)
+		return fmt.Errorf("gofmt: %v\n%s", err, out)
 	}
-	banned := []string{
-		"reqwest", "hyper", "ureq", "curl", "isahc", "surf", "attohttpc",
-		"tokio", "async-std", "socket2", "rustls", "native-tls", "openssl",
+	if files := strings.TrimSpace(string(out)); files != "" {
+		return fmt.Errorf("not gofmt-clean (run gofmt -w):\n%s", files)
 	}
+	return nil
+}
+
+// listDeps runs `go list` over the darwin build of every package, which is the only
+// build there is.
+func listDeps(format string) ([]string, error) {
+	cmd := exec.Command("go", "list", "-deps", "-f", format, "./...")
+	cmd.Env = append(os.Environ(), "GOOS=darwin", "GOARCH=arm64", "CGO_ENABLED=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("go list: %v\n%s", err, out)
+	}
+	return strings.Split(strings.TrimSpace(string(out)), "\n"), nil
+}
+
+// netImporters may import the standard "net" package. pflag, Cobra's flag parser, imports
+// it to parse IP-address flags; recordo defines none, and the linker drops the dialing
+// and resolving code — scripts/check-local-only.sh verifies that against the binary.
+var netImporters = map[string]bool{"github.com/spf13/pflag": true}
+
+// checkNoNetworkDeps guards recordo's central promise — recordings never leave the
+// machine — at the dependency level. scripts/check-local-only.sh asserts the same
+// property against a built binary, but that needs macOS; this catches a networking
+// package the moment it enters the graph, anywhere.
+func checkNoNetworkDeps() error {
+	lines, err := listDeps(`{{.ImportPath}}|{{.Standard}}|{{join .Imports ","}}`)
+	if err != nil {
+		return err
+	}
+	banned := []string{"net/http", "crypto/tls", "net/rpc", "net/smtp", "golang.org/x/net"}
 	var found []string
-	for line := range strings.Lines(string(lock)) {
-		name, ok := strings.CutPrefix(strings.TrimSpace(line), "name = ")
-		if !ok {
+	for _, line := range lines {
+		parts := strings.SplitN(line, "|", 3)
+		if len(parts) != 3 {
 			continue
 		}
-		name = strings.Trim(name, `"`)
+		pkg, std, imports := parts[0], parts[1] == "true", strings.Split(parts[2], ",")
 		for _, b := range banned {
-			if strings.EqualFold(name, b) {
-				found = append(found, name)
+			if pkg == b || strings.HasPrefix(pkg, b+"/") {
+				found = append(found, pkg)
 			}
+		}
+		if !std && !netImporters[pkg] && slices.Contains(imports, "net") {
+			found = append(found, pkg+" imports net")
 		}
 	}
 	if len(found) > 0 {
-		return fmt.Errorf("networking crates entered Cargo.lock: %s", strings.Join(found, ", "))
+		return fmt.Errorf("networking entered the dependency graph: %s", strings.Join(found, ", "))
 	}
 	return nil
+}
+
+// allowedLicences is the licence policy: permissive
+// licences only. Above all no GPL — libx264/libx265 are why ffmpeg is run as a separate
+// program rather than linked.
+var allowedLicences = []string{
+	"MIT License", "Permission is hereby granted, free of charge", // MIT
+	"Apache License", // Apache-2.0
+	"Redistribution and use in source and binary forms",                      // BSD-2/3-Clause
+	"Permission to use, copy, modify, and/or distribute",                     // ISC, 0BSD
+	"This is free and unencumbered software released into the public domain", // Unlicense
+	"Mozilla Public License",                                                 // MPL-2.0
+}
+
+var forbiddenLicences = []string{"GNU GENERAL PUBLIC LICENSE", "GNU AFFERO GENERAL PUBLIC LICENSE", "GNU LESSER GENERAL PUBLIC LICENSE"}
+
+// checkLicences reads the licence of every module compiled into recordo — the ones its
+// licence obligations actually come from. A module with no recognisable permissive
+// licence fails, as does any GPL-family licence anywhere in it. It reads modules from
+// `go list -deps` rather than `go mod download all`, which would also fetch test-only
+// modules of dependencies and leave go.sum modified after a local run.
+func checkLicences() error {
+	lines, err := listDeps(`{{with .Module}}{{if not .Main}}{{.Path}}|{{.Dir}}{{end}}{{end}}`)
+	if err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	var problems []string
+	for _, line := range lines {
+		path, dir, ok := strings.Cut(line, "|")
+		if !ok || seen[path] {
+			continue
+		}
+		seen[path] = true
+		if dir == "" {
+			problems = append(problems, path+": not downloaded (run go mod download)")
+			continue
+		}
+		text, err := licenceText(dir)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", path, err))
+			continue
+		}
+		upper := strings.ToUpper(text)
+		for _, f := range forbiddenLicences {
+			if strings.Contains(upper, f) {
+				problems = append(problems, path+": "+strings.ToLower(f))
+			}
+		}
+		if !slices.ContainsFunc(allowedLicences, func(a string) bool { return strings.Contains(text, a) }) {
+			problems = append(problems, path+": licence not on the allow-list")
+		}
+	}
+	if len(seen) == 0 {
+		return errors.New("found no modules to check — the check inspected nothing")
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("licence policy:\n  %s", strings.Join(problems, "\n  "))
+	}
+	return nil
+}
+
+func licenceText(dir string) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	for _, e := range entries {
+		name := strings.ToUpper(e.Name())
+		if !e.IsDir() && (strings.HasPrefix(name, "LICENSE") || strings.HasPrefix(name, "LICENCE") || strings.HasPrefix(name, "COPYING")) {
+			data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+			if err != nil {
+				return "", err
+			}
+			b.Write(data)
+		}
+	}
+	if b.Len() == 0 {
+		return "", errors.New("no licence file")
+	}
+	return b.String(), nil
 }
 
 func onPath(bin string) bool {

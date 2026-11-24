@@ -10,9 +10,18 @@ that follows your cursor, rounded corners, a drop shadow and a styled background
 browsers it keeps only the web page and draws a clean window frame around it, so the
 video shows no tabs, bookmarks, profile avatar or URL history.
 
-macOS 26 (Tahoe) or later. See [why 26 and not 15](CONTRIBUTING.md#getting-set-up).
+macOS 15 (Sequoia) or later.
 
 ## Install
+
+You need Go, the Xcode Command Line Tools, and FFmpeg to render:
+
+```sh
+brew install go ffmpeg
+xcode-select --install          # if you have not already
+```
+
+Then either clone and run the installer:
 
 ```sh
 git clone https://github.com/waarispierre/recordo.git
@@ -20,26 +29,26 @@ cd recordo
 ./install.sh
 ```
 
-The installer checks prerequisites before building, so a missing dependency surfaces
-immediately rather than four minutes into a compile. Then:
+or, with Go already on your `PATH`, install in one line:
+
+```sh
+go install github.com/waarispierre/recordo/cmd/recordo@latest
+```
+
+Both put `recordo` in Go's bin folder (`$(go env GOPATH)/bin` unless you set `GOBIN`).
+The installer checks every prerequisite before building, so a missing one surfaces
+immediately, stamps the version from git, and tells you if that folder is not on your
+`PATH`. Then:
 
 ```sh
 recordo doctor
 ```
 
-You need [Rust](https://rustup.rs) to build and FFmpeg to render:
-
-```sh
-brew install ffmpeg
-```
-
 <details>
 <summary>Why not Homebrew?</summary>
 
-A tap would mean a second repository to maintain, a release process, and — because
-Homebrew builds inside a sandbox that SwiftPM's own sandbox cannot nest within — a shim
-that disabled a layer of build isolation. That is a poor trade this early for one binary
-on one platform.
+A tap would mean a second repository to maintain and a release process. That is a poor
+trade this early for one binary on one platform.
 
 </details>
 
@@ -73,9 +82,11 @@ recordo
  j/k move · enter select · tab switch · q quit
 ```
 
-`tab` cycles panes (or `1`/`2`/`3`), `j`/`k` move, `enter` acts, `q` quits. The settings
-pane shows each option's explanation beside it and a colour swatch for colours. Recording
-and rendering suspend the app and hand the terminal back, then return.
+`tab` cycles panes (or `1`/`2`/`3`), `j`/`k` move, `enter` acts, `q` quits. On the record
+pane `w` shows a live webcam preview for framing, and while recording `p` pauses — paused
+stretches are cut from the video. The settings pane shows each option's explanation beside
+it and a colour swatch for colours. Recording, rendering and compressing all run inside
+the app, with their progress drawn in place.
 
 Everything is also available as plain subcommands, which is what runs in scripts and over
 a pipe:
@@ -103,6 +114,8 @@ recordo devices         # list microphones and cameras, and the names the config
 recordo list            # list past recordings
 recordo render          # re-render the most recent recording
 recordo render <path>   # re-render a specific one
+recordo compress --max-mb 25    # shrink the latest export for an upload limit
+recordo config          # browse and edit settings
 ```
 
 `render` picks up config changes without needing a new capture.
@@ -271,10 +284,14 @@ network code — `scripts/check-local-only.sh` asserts that against the built bi
 every run, rather than leaving it as a promise.
 
 ```sh
-cargo build --release && ./scripts/check-local-only.sh
+go build -o bin/recordo ./cmd/recordo && ./scripts/check-local-only.sh bin/recordo
 ```
 
-The same check runs in CI, which you can reproduce locally with `go run ci/main.go`.
+It checks the Go code the linker kept rather than socket imports, which every Go binary on
+macOS declares whether or not it networks: no dialer, listener, resolver, connection, HTTP
+or TLS code may survive into the binary. A second check fails the moment a networking
+package enters the dependency graph. Both run in CI, which you can reproduce locally with
+`go run ./ci`.
 
 Recordings live in `~/Movies/Recordo/`, created `0700` with every file `0600`, so
 other accounts on the machine cannot read them. The config directory is the same.
@@ -304,7 +321,10 @@ including known limitations.
   Switch to that Space first.
 - **Chromium browsers** (Edge, Chrome, Brave) only expose their accessibility tree on
   request, and not at all while parked on another Space. Safari is reliable.
-- Rendering runs at roughly real time on a Retina display; there is little headroom at 4K.
+- **A window that runs past the edge of the screen cannot be recorded as it is**, since
+  the capture is cropped from one display. Move it fully onto the screen.
+- Rendering runs several times faster than real time at laptop resolutions, with less
+  headroom at 4K.
 
 
 ## Licence
@@ -326,8 +346,16 @@ Video is encoded with `h264_videotoolbox`, the hardware encoder built into macOS
 H.264 patent licensing is covered by Apple's operating system rather than by this
 project.
 
-`cargo deny check` runs in CI and fails the build if any dependency would introduce a
-copyleft licence or link FFmpeg directly.
+`go run ./ci` reads every dependency's licence and fails the build on any copyleft
+licence, so nothing GPL can be linked in by accident.
+
+## How it is built
+
+Go, with the macOS APIs (ScreenCaptureKit, AVFoundation, Accessibility) reached through
+small Objective-C files via cgo, compositing on the GPU through WebGPU, and the terminal
+interface built on [Charm](https://charm.land)'s Bubble Tea, Lip Gloss, Huh and Fang.
+The code is organised as vertical slices — one folder per feature, holding its logic, its
+command and its screen. [docs/code-tour.md](docs/code-tour.md) walks through it.
 
 ### Contributing
 

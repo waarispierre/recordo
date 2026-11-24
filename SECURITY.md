@@ -18,13 +18,14 @@ graph.
 This is not a promise you have to take on trust:
 
 ```sh
-cargo build --release && ./scripts/check-local-only.sh
+go build -o bin/recordo ./cmd/recordo && ./scripts/check-local-only.sh bin/recordo
 ```
 
 That script asserts, against the compiled binary, that no networking framework is linked,
-no socket syscall or URL-loading symbol is imported, and no networking or TLS crate is in
-`Cargo.lock`. It runs in CI on every change, so a dependency that would break the
-guarantee fails the build.
+no URL-loading symbol is imported, and no dialing, listening, resolving, connection, HTTP
+or TLS code survived the linker. CI separately fails the moment a networking package
+enters the dependency graph. Both run on every change, so a dependency that would break
+the guarantee fails the build.
 
 **Recordings stay in `~/Movies/Recordo/`**, in per-recording folders created `0700`, with
 every file written `0600`. Other accounts on the same Mac cannot read them.
@@ -87,12 +88,15 @@ Stated plainly rather than omitted.
 - **`telemetry.json` records global cursor coordinates**, including movement outside the
   recorded window. Local-only and `0600`, but it is more than the recorded region.
 
-- **A dormant socket capability is linked in.** `apple-cf`, a transitive dependency of
-  `screencapturekit`, ships a `CFSocket` wrapper including a UDP constructor, and it
-  survives into the binary. No recordo code calls it, and `check-local-only.sh` fails the
-  build if any crate other than `apple-cf` reaches for a socket API. But "recordo never
-  opens a socket" is accurate while "this binary is incapable of opening one" is not, and
-  the difference is worth stating.
+- **The socket functions are declared, though nothing can call them.** On macOS, Go's
+  standard `syscall` package declares the libc socket functions in every Go binary,
+  networking or not, and `spf13/pflag` (the flag parser) imports Go's `net` package to
+  parse IP-address flags, which recordo does not define. The linker keeps only `net`'s
+  inert parts — IP constants and initialisation — and `check-local-only.sh` fails the
+  build if any dialer, listener, resolver or connection code survives, or if any package
+  other than `pflag` imports `net`. So "recordo never opens a socket" is accurate and
+  checked on every change, while "this binary contains no reference to a socket function"
+  is not, and the difference is worth stating.
 
 - **FFmpeg is a large parser handling your capture.** recordo invokes it with
   `-protocol_whitelist file,pipe,fd`, so it cannot follow a remote reference embedded in
@@ -119,8 +123,8 @@ Stated plainly rather than omitted.
 
 recordo **executes** `ffmpeg` as a subprocess and never links it, so FFmpeg's GPL licence
 does not extend to this project, and no FFmpeg binary is bundled or redistributed here.
-`deny.toml` bans `ffmpeg-next`, `ffmpeg-sys` and `x264` by name so this cannot change by
-accident, and `cargo deny check` runs in CI.
+CI reads every Go dependency's licence and fails on any copyleft licence, so this cannot
+change by accident.
 
 Video is encoded with `h264_videotoolbox`, the hardware encoder built into macOS, so H.264
 patent licensing sits with the operating system rather than with this project.
