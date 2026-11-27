@@ -266,16 +266,17 @@ func Run(src, dst string, opts Options) (rep Report, err error) {
 	contentWPx, contentHPx := uint32(math.Round(content.W)), uint32(math.Round(content.H))
 	outW, outH := gpu.OutputSize(contentWPx, contentHPx, style)
 
-	// Fixed content rect within the full captured frame, normalized. The click-zoom effect
-	// never resamples the source — it only scales and pans the rendered window — so this
-	// is the same window content every frame regardless of zoom.
+	// Fixed content rect within the full captured frame, normalized. The click-zoom camera
+	// moves over the composited scene, so this is the same every frame.
 	contentUV := [4]float32{
 		float32(content.X / float64(w)), float32(content.Y / float64(h)),
 		float32(content.W / float64(w)), float32(content.H / float64(h)),
 	}
-	zooms := make([]gpu.WindowZoom, len(crops))
+	// The same title bar height the renderer draws, so the zoom lands on the right content.
+	chromeH := gpu.ChromeHeight(style.Chrome, h)
+	zooms := make([]gpu.Zoom, len(crops))
 	for i, c := range crops {
-		zooms[i] = gpu.ZoomFor(c, content.W, content.H, camCfg.MaxZoom, outW, outH, style.Padding)
+		zooms[i] = gpu.ZoomFor(c, content.W, content.H, outW, outH, style.Padding, chromeH)
 	}
 	if len(zooms) == 0 {
 		return rep, errors.New("camera produced no crops")
@@ -404,8 +405,8 @@ func Run(src, dst string, opts Options) (rep Report, err error) {
 			break
 		}
 		// Hold the last solved zoom if ffmpeg emits more frames than we solved for.
-		win := zooms[min(rendered, len(zooms)-1)]
-		out, renderErr = renderer.Render(f.src, win, f.camFrame(), out)
+		zoom := zooms[min(rendered, len(zooms)-1)]
+		out, renderErr = renderer.Render(f.src, zoom, f.camFrame(), out)
 		rd.release(f)
 		if renderErr != nil || !wr.send(out) {
 			stoppedEarly = true

@@ -1,11 +1,10 @@
-// Composites one recorded frame: whole-window click-zoom, synthetic window chrome,
-// rounded corners, drop shadow, gradient background.
+// Composites one recorded frame: synthetic window chrome, rounded corners, drop shadow,
+// gradient background, all viewed through the click-zoom camera.
 //
-// The click-zoom effect scales and pans the whole window — chrome, content, corner
-// radius and shadow together — as a single unit, while the canvas (background and
-// padding margin) stays fixed. The source is always sampled 1:1 through the same fixed
-// content rect; magnification comes from resizing the window on the canvas, not from
-// resampling the source.
+// The scene — the window at its full size, padded on the background — never changes. The
+// click-zoom camera magnifies all of it together around a point, as if moving closer to
+// the screen: each output pixel is mapped back to the scene point it shows before
+// anything is drawn. Only the webcam overlay sits outside the scene, fixed to the frame.
 //
 // The chrome is drawn rather than captured. That lets a recording of a bare web page be
 // presented as a browser window with no tabs, no bookmarks, no profile avatar and no URL
@@ -13,12 +12,11 @@
 
 struct Uniforms {
     // Fixed content rect within the source texture, normalized: xy = origin, zw = size.
-    // The click-zoom effect never changes this — it resizes and pans the window instead.
     content_uv: vec4<f32>,
-    // How far the window's centre is shifted from the canvas centre, in output pixels.
-    win_offset: vec2<f32>,
-    // The window's fraction of its full, canvas-filling size: 1.0 at full zoom.
-    win_scale: f32,
+    // The click-zoom camera: the scene point, in output pixels, at the frame's centre,
+    // and the magnification around it (1.0 shows the whole scene).
+    zoom_centre: vec2<f32>,
+    zoom_scale: f32,
     _pad0: f32,
     out_size: vec2<f32>,
     padding: f32,
@@ -29,7 +27,7 @@ struct Uniforms {
     bg_top: vec4<f32>,
     bg_bottom: vec4<f32>,
     chrome_bg: vec4<f32>,
-    // Title bar height in output pixels at win_scale = 1.0; 0 disables the chrome entirely.
+    // Title bar height in scene pixels; 0 disables the chrome entirely.
     chrome_height: f32,
     // 0 = plain title bar, 1 = also draw a Safari-style URL pill.
     chrome_style: f32,
@@ -74,16 +72,22 @@ fn rounded_box_sdf(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
     return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - radius;
 }
 
-fn circle(p: vec2<f32>, centre: vec2<f32>, r: f32) -> f32 {
-    return 1.0 - smoothstep(r - 1.0, r + 1.0, length(p - centre));
+// aa is the antialiasing half-width: one output pixel, in scene units.
+fn circle(p: vec2<f32>, centre: vec2<f32>, r: f32, aa: f32) -> f32 {
+    return 1.0 - smoothstep(r - aa, r + aa, length(p - centre));
 }
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let p = in.uv * u.out_size;
+    let frame_p = in.uv * u.out_size;
     let centre = u.out_size * 0.5;
 
-    var color = mix(u.bg_top, u.bg_bottom, in.uv.y);
+    // The camera: the scene point this output pixel shows. Everything below except the
+    // webcam is drawn in scene space, so the whole picture zooms together.
+    let p = u.zoom_centre + (frame_p - centre) / u.zoom_scale;
+    let aa = 1.0 / u.zoom_scale;
+
+    var color = mix(u.bg_top, u.bg_bottom, p.y / u.out_size.y);
     if (u.use_bg_image > 0.5) {
         // Cover fit: scale so the image fills both axes, then centre-crop the overflow.
         let scale = max(u.out_size.x / u.bg_image_size.x, u.out_size.y / u.bg_image_size.y);
@@ -93,18 +97,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         color = textureSampleLevel(bg_tex, src_sampler, bg_uv, 0.0);
     }
 
-    // The whole window — chrome, content, corner radius and shadow — scales and pans
-    // together as one unit for the click-zoom effect. `win_scale` never exceeds 1.0, so
-    // the window (at its native size below) never grows past the canvas.
-    let native_half = centre - vec2<f32>(u.padding);
-    let win_half = native_half * u.win_scale;
-    let win_centre = centre + u.win_offset;
-    let radius = min(u.corner_radius * u.win_scale, min(win_half.x, win_half.y));
+    // The window fills the canvas inside the padding.
+    let win_half = centre - vec2<f32>(u.padding);
+    let win_centre = centre;
+    let radius = min(u.corner_radius, min(win_half.x, win_half.y));
 
-    // Shadow: the same rounded box, offset and softened, scaled with the window so it
-    // reads as attached to it rather than painted on the canvas.
-    let shadow_d = rounded_box_sdf(p - win_centre - u.shadow_offset * u.win_scale, win_half, radius);
-    let shadow = (1.0 - smoothstep(0.0, u.shadow_blur * u.win_scale, shadow_d)) * u.shadow_alpha;
+    // Shadow: the same rounded box, offset and softened.
+    let shadow_d = rounded_box_sdf(p - win_centre - u.shadow_offset, win_half, radius);
+    let shadow = (1.0 - smoothstep(0.0, u.shadow_blur, shadow_d)) * u.shadow_alpha;
     color = mix(color, vec4<f32>(0.0, 0.0, 0.0, 1.0), shadow);
 
     // The window is the full rounded box; the chrome occupies its top strip and the
@@ -112,14 +112,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let win_min = win_centre - win_half;
     let win_size = win_half * 2.0;
     let win_d = rounded_box_sdf(p - win_centre, win_half, radius);
-    let chrome_height = u.chrome_height * u.win_scale;
+    let chrome_height = u.chrome_height;
 
     var window_color = u.chrome_bg;
     let content_top = win_min.y + chrome_height;
 
     if (p.y >= content_top) {
-        // Map into the content area, then onto the fixed content rect. The click-zoom
-        // effect never resamples the source — it only resizes and moves the window.
+        // Map into the content area, then onto the fixed content rect.
         let local = vec2<f32>(
             (p.x - win_min.x) / win_size.x,
             (p.y - content_top) / max(win_size.y - chrome_height, 1.0),
@@ -136,45 +135,46 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         let gap = r * 3.1;
         let x0 = win_min.x + gap + r;
         window_color = mix(window_color, vec4<f32>(1.0, 0.37, 0.34, 1.0),
-            circle(p, vec2<f32>(x0, cy), r));
+            circle(p, vec2<f32>(x0, cy), r, aa));
         window_color = mix(window_color, vec4<f32>(1.0, 0.74, 0.20, 1.0),
-            circle(p, vec2<f32>(x0 + gap, cy), r));
+            circle(p, vec2<f32>(x0 + gap, cy), r, aa));
         window_color = mix(window_color, vec4<f32>(0.16, 0.79, 0.25, 1.0),
-            circle(p, vec2<f32>(x0 + gap * 2.0, cy), r));
+            circle(p, vec2<f32>(x0 + gap * 2.0, cy), r, aa));
 
         // Safari-style URL pill, centred in the title bar.
         if (u.chrome_style > 0.5) {
             let pill_h = chrome_height * 0.52;
-            let pill_w = min(win_size.x * 0.34, 420.0 * u.win_scale);
+            let pill_w = min(win_size.x * 0.34, 420.0);
             let pill_d = rounded_box_sdf(
                 p - vec2<f32>(win_centre.x, cy),
                 vec2<f32>(pill_w * 0.5, pill_h * 0.5),
                 pill_h * 0.5,
             );
             window_color = mix(window_color, u.pill_color,
-                1.0 - smoothstep(-1.0, 1.0, pill_d));
+                1.0 - smoothstep(-aa, aa, pill_d));
         }
     }
 
     // One-pixel antialiased edge so corners do not stair-step.
-    let edge = 1.0 - smoothstep(-1.0, 1.0, win_d);
+    let edge = 1.0 - smoothstep(-aa, aa, win_d);
     color = mix(color, window_color, edge);
 
-    // Webcam picture-in-picture, drawn last so it sits above everything else. It reuses
-    // the same rounded-box SDF the window uses — a circle is simply a radius of half the
-    // short side, so no separate "is this a circle" branch is needed.
+    // Webcam picture-in-picture, drawn last so it sits above everything else, and in frame
+    // space so the zoom leaves it alone. It reuses the same rounded-box SDF the window
+    // uses — a circle is simply a radius of half the short side, so no separate "is this
+    // a circle" branch is needed.
     if (u.cam_enabled > 0.5) {
         let cam_centre = u.cam_rect.xy + u.cam_rect.zw * 0.5;
         let cam_half = u.cam_rect.zw * 0.5;
-        let cam_d = rounded_box_sdf(p - cam_centre, cam_half, u.cam_radius);
+        let cam_d = rounded_box_sdf(frame_p - cam_centre, cam_half, u.cam_radius);
 
         // A soft shadow behind the camera, the same shape offset and blurred, so it
         // reads as floating above the content rather than pasted onto it.
-        let cam_shadow_d = rounded_box_sdf(p - cam_centre - vec2<f32>(0.0, 4.0), cam_half, u.cam_radius);
+        let cam_shadow_d = rounded_box_sdf(frame_p - cam_centre - vec2<f32>(0.0, 4.0), cam_half, u.cam_radius);
         let cam_shadow = (1.0 - smoothstep(0.0, 16.0, cam_shadow_d)) * 0.35;
         color = mix(color, vec4<f32>(0.0, 0.0, 0.0, 1.0), cam_shadow);
 
-        let cam_uv = (p - u.cam_rect.xy) / u.cam_rect.zw;
+        let cam_uv = (frame_p - u.cam_rect.xy) / u.cam_rect.zw;
         let cam_color = textureSampleLevel(cam_tex, src_sampler, cam_uv, 0.0);
         let cam_edge = 1.0 - smoothstep(-1.0, 1.0, cam_d);
         color = mix(color, cam_color, cam_edge);

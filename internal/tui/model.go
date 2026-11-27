@@ -317,21 +317,44 @@ func newHelp() help.Model {
 	return h
 }
 
-// newBar is the render progress bar: 24 cells of ▰/▱, with the frame count beside it
-// rather than a percentage.
+// barWidth is the width in cells of both job indicators, so a compress reads as the same
+// kind of thing as a render.
+const barWidth = 24
+
+// newBar is the render progress bar: barWidth cells of ▰/▱, with the frame count beside
+// it rather than a percentage.
 func newBar() progress.Model {
 	bar := progress.New(
 		progress.WithFillCharacters('▰', '▱'),
-		progress.WithWidth(24),
+		progress.WithWidth(barWidth),
 		progress.WithoutPercentage(),
 	)
 	bar.FullColor, bar.EmptyColor = lipgloss.NoColor{}, lipgloss.NoColor{}
 	return bar
 }
 
+// newSpinner is the compress indicator. ffmpeg reports no progress for it, so rather than
+// a fill it is a short segment sweeping back and forth across a bar as wide as the render
+// bar.
 func newSpinner() spinner.Model {
 	return spinner.New(spinner.WithSpinner(spinner.Spinner{
-		Frames: []string{"▱▱▱", "▰▱▱", "▰▰▱", "▰▰▰", "▱▰▰", "▱▱▰"},
-		FPS:    120 * time.Millisecond,
+		Frames: sweepFrames(barWidth, 6),
+		FPS:    60 * time.Millisecond,
 	}))
+}
+
+// sweepFrames are the frames of a seg-cell ▰ segment travelling across a width-cell ▱ bar
+// and back, without repeating a frame at either end.
+func sweepFrames(width, seg int) []string {
+	frame := func(at int) string {
+		return strings.Repeat("▱", at) + strings.Repeat("▰", seg) + strings.Repeat("▱", width-seg-at)
+	}
+	var frames []string
+	for at := 0; at <= width-seg; at++ {
+		frames = append(frames, frame(at))
+	}
+	for at := width - seg - 1; at > 0; at-- {
+		frames = append(frames, frame(at))
+	}
+	return frames
 }

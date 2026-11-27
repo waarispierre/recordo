@@ -46,44 +46,48 @@ func OutputSize(srcW, srcH uint32, s config.Style) (uint32, uint32) {
 	return (srcW + pad + 1) &^ 1, (srcH + chrome + pad + 1) &^ 1
 }
 
-// WindowZoom is the whole-window scale and pan for one output frame: how much of its
-// full, canvas-filling size the window (chrome, content, corners and shadow, as one unit)
-// is drawn at, and how far its centre shifts from the canvas centre.
-type WindowZoom struct {
-	Scale  float32
-	Offset [2]float32
+// Zoom is the camera over the composited scene for one output frame.
+//
+// The scene is the canvas as it looks at rest: the window at its full size, padded on the
+// background. The window never moves or resizes. Instead the camera magnifies the whole
+// scene — background, shadow, window frame and content alike — by Scale around Centre, as
+// if moving closer to the screen, so at higher zooms the window's frame passes out of
+// shot.
+type Zoom struct {
+	// Scale is the magnification; 1 shows the whole scene.
+	Scale float32
+	// Centre is the scene point, in output pixels, that lands at the centre of the frame.
+	Centre [2]float32
 }
 
-// ZoomFor derives a WindowZoom from a content-space zoom crop (see camera.Solve).
+// ZoomFor derives a Zoom from a content-space zoom crop (see camera.Solve).
 //
-// Scale is the crop's magnification relative to maxZoom, so the window is at its
-// smallest, resting size when the crop is the full frame and grows to fill the canvas
-// exactly as the crop reaches its tightest. The pan comes from how far the crop's centre
-// has drifted from the content's centre — zero at rest, since an unzoomed crop is always
-// the full frame — applied against whatever room is actually left on each axis once the
-// window's own size is subtracted from the canvas. That room shrinks to a constant (the
-// padding margin) as scale reaches 1.0, so the window can never grow past the canvas and
-// its shadow and rounded corners are never clipped.
-func ZoomFor(crop camera.Crop, contentW, contentH, maxZoom float64, outW, outH uint32, padding float32) WindowZoom {
-	zoom := contentW / math.Max(crop.W, 1e-6)
-	scale := clamp32(float32(zoom/math.Max(maxZoom, 1e-6)), 0, 1)
+// The magnification is the crop's, so the content appears contentW/crop.W times its
+// resting size. The centre is the crop's centre, mapped from content space to where that
+// content sits in the scene, then held far enough from the canvas edges that the camera
+// never looks past them. At rest the crop is the full frame, so the camera shows exactly
+// the whole canvas.
+//
+// chromeH must be the title bar height the renderer draws (ChromeHeight of the source
+// height), so the mapping matches the shader's layout.
+func ZoomFor(crop camera.Crop, contentW, contentH float64, outW, outH uint32, padding, chromeH float32) Zoom {
+	scale := math.Max(contentW/math.Max(crop.W, 1e-6), 1)
+	ow, oh := float64(outW), float64(outH)
+	pad, chrome := float64(padding), float64(chromeH)
 
-	// Signed fraction of content size the crop's centre has drifted from the content's own
-	// centre; bounded to roughly +/-0.5 by the crop always fitting inside the content.
-	fx := ((crop.X + crop.W/2) - contentW/2) / contentW
-	fy := ((crop.Y + crop.H/2) - contentH/2) / contentH
+	// The content area in the scene, laid out as the shader does: the window fills the
+	// canvas inside the padding, and the content fills the window below the chrome.
+	areaW, areaH := ow-2*pad, oh-2*pad-chrome
+	cx := pad + (crop.X+crop.W/2)/contentW*areaW
+	cy := pad + chrome + (crop.Y+crop.H/2)/contentH*areaH
 
-	halfW, halfH := float32(outW)/2, float32(outH)/2
-	winHalfW, winHalfH := (halfW-padding)*scale, (halfH-padding)*scale
-	availW, availH := halfW-winHalfW, halfH-winHalfH
-
-	return WindowZoom{
-		Scale: scale,
-		Offset: [2]float32{
-			clamp32(float32(fx)*2, -1, 1) * availW,
-			clamp32(float32(fy)*2, -1, 1) * availH,
-		},
+	halfW, halfH := ow/(2*scale), oh/(2*scale)
+	return Zoom{
+		Scale:  float32(scale),
+		Centre: [2]float32{float32(clamp64(cx, halfW, ow-halfW)), float32(clamp64(cy, halfH, oh-halfH))},
 	}
 }
+
+func clamp64(v, lo, hi float64) float64 { return math.Max(lo, math.Min(v, hi)) }
 
 func clamp32(v, lo, hi float32) float32 { return max(lo, min(v, hi)) }

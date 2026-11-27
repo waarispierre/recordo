@@ -2,10 +2,9 @@
 //
 // It renders one frame at a time by uploading the decoded source frame,
 // drawing a full-screen triangle that composites the window — chrome, content, corners
-// and shadow, scaled and panned as one unit for the click-zoom effect — over a static
-// background, then reading the result back. Readback via CPU is the simple path and is
-// fast enough to beat real time; a later phase can keep frames on the GPU and hand them
-// straight to the encoder.
+// and shadow — over a background, viewed through the click-zoom camera, then reading the
+// result back. Readback via CPU is the simple path and is fast enough to beat real time; a
+// later phase can keep frames on the GPU and hand them straight to the encoder.
 package gpu
 
 import (
@@ -24,13 +23,11 @@ var shaderSource string
 // so Go inserts no padding of its own; the explicit pads reproduce WGSL's alignment rules
 // (a vec4 starts on a 16-byte boundary). uniformsLayout in the tests pins this.
 type uniforms struct {
-	// Fixed content rect within the source texture, normalized. The click-zoom effect
-	// never changes this — it resizes and pans the window instead.
+	// Fixed content rect within the source texture, normalized.
 	ContentUV [4]float32
-	// How far the window's centre is shifted from the canvas centre, in output pixels.
-	WinOffset [2]float32
-	// The window's fraction of its full, canvas-filling size; 1.0 at full zoom.
-	WinScale     float32
+	// The click-zoom camera; see Zoom.
+	ZoomCentre   [2]float32
+	ZoomScale    float32
 	_            float32
 	OutSize      [2]float32
 	Padding      float32
@@ -194,7 +191,8 @@ func NewRenderer(srcW, srcH, outW, outH uint32, style config.Style, background *
 
 	r.base = uniforms{
 		ContentUV:    contentUV,
-		WinScale:     1,
+		ZoomCentre:   [2]float32{float32(outW) / 2, float32(outH) / 2},
+		ZoomScale:    1,
 		OutSize:      [2]float32{float32(outW), float32(outH)},
 		Padding:      style.Padding,
 		CornerRadius: style.CornerRadius,
@@ -358,7 +356,7 @@ func (r *Renderer) OutFrameBytes() int { return int(r.outW * r.outH * 4) }
 // exactly the geometry's Width*Height*4 bytes; nil for a frame (the camera track ran out,
 // or never started) simply leaves the overlay off for that frame rather than freezing a
 // stale picture on screen.
-func (r *Renderer) Render(src []byte, win WindowZoom, camRGBA []byte, out []byte) ([]byte, error) {
+func (r *Renderer) Render(src []byte, zoom Zoom, camRGBA []byte, out []byte) ([]byte, error) {
 	if want := int(r.srcW * r.srcH * 4); len(src) != want {
 		return out, fmt.Errorf("frame is %d bytes, expected %d", len(src), want)
 	}
@@ -367,8 +365,8 @@ func (r *Renderer) Render(src []byte, win WindowZoom, camRGBA []byte, out []byte
 	}
 
 	u := r.base
-	u.WinOffset = win.Offset
-	u.WinScale = win.Scale
+	u.ZoomCentre = zoom.Centre
+	u.ZoomScale = zoom.Scale
 	if camRGBA != nil && r.cam != nil {
 		if err := r.upload(r.camTex, camRGBA, r.cam.Width, r.cam.Height); err != nil {
 			return out, fmt.Errorf("upload webcam frame: %w", err)
